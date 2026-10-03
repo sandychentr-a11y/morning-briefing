@@ -20,97 +20,91 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 精確更新商品代碼與備援機制
+# 2. 定義指數代碼與備援列表 (Ticker Map with Fallbacks)
 # ---------------------------------------------------------
-TICKERS = {
+TICKERS_CONFIG = {
     # 美國 & 歐洲
-    "道瓊工業指數": "^DJI",
-    "那斯達克指數": "^IXIC",
-    "標普500指數": "^GSPC",
-    "費城半導體指數": "^SOX",
-    "羅素2000指數": "^RUT",
-    "英國FTSE 100": "^FTSE",
-    "德國DAX指數": "^GDAXI",
-    "法國CAC指數": "^FCHI",
-    "道瓊歐洲600指數": "^STOXX",
+    "道瓊工業指數": ["^DJI"],
+    "那斯達克指數": ["^IXIC"],
+    "標普500指數": ["^GSPC"],
+    "費城半導體指數": ["^SOX"],
+    "羅素2000指數": ["^RUT"],
+    "英國FTSE 100": ["^FTSE"],
+    "德國DAX指數": ["^GDAXI"],
+    "法國CAC指數": ["^FCHI"],
+    "道瓊歐洲600指數": ["^STOXX"],
     # 亞洲
-    "日經225指數": "^N225",
-    "南韓KOSPI指數": "^KS11",
-    "恆生指數": "^HSI",
-    "上證指數": "000001.SS",
-    "新加坡STI指數": "^STI",
-    "泰國曼谷SET指數": "^SET.BK",
-    "富時馬來西亞指數": "^KLSE",
-    "菲律賓綜合指數": "^PSI",  # 已修正代碼
-    "印尼雅加達指數": "^JKSE",
+    "日經225指數": ["^N225"],
+    "南韓KOSPI指數": ["^KS11"],
+    "恆生指數": ["^HSI"],
+    "上證指數": ["000001.SS"],
+    "新加坡STI指數": ["^STI"],
+    "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
+    "富時馬來西亞指數": ["^KLSE"],
+    "菲律賓綜合指數": ["^PSI", "^PSEI", "PSEI.XC"],
+    "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
-    "加權指數": "^TWII",
-    "不含電子指數": "0052.TW",  # 以富邦科技/相關替代指標或TWSE備援
-    "上櫃指數": "^TWOII",
-    "0050": "0050.TW",
-    "0051": "0051.TW",
-    "MSCI全球指數": "URTH",
-    "歐洲Stoxx 50": "^STOXX50E",
-    "MSCI新興市場": "EEM",
-    "MSCI拉丁美洲": "ILF",
+    "加權指數": ["^TWII"],
+    "不含電子指數": ["^TW28", "0052.TW"],
+    "上櫃指數": ["^TWO", "^TWOII"],
+    "0050": ["0050.TW"],
+    "0051": ["0051.TW"],
+    "MSCI全球指數": ["URTH"],
+    "歐洲Stoxx 50": ["^STOXX50E"],
+    "MSCI新興市場": ["EEM"],
+    "MSCI拉丁美洲": ["ILF"],
     # 金屬能源
-    "Crude Oil 原油": "CL=F",
-    "Natural Gas 天然氣": "NG=F",
-    "Gold 黃金": "GC=F",
-    "Silver 白銀": "SI=F",
-    "Copper 銅": "HG=F",
+    "Crude Oil 原油": ["CL=F"],
+    "Natural Gas 天然氣": ["NG=F"],
+    "Gold 黃金": ["GC=F"],
+    "Silver 白銀": ["SI=F"],
+    "Copper 銅": ["HG=F"],
     # 農作物商品
-    "CRB 商品指數": "DBC",  # 改用通用 CRB  commodity ETF DBC
-    "Corn 玉米": "ZC=F",
-    "Wheat 小麥": "ZW=F",
-    "Soybean 黃豆": "ZS=F",
-    "Cotton 棉花": "CT=F",
+    "CRB 商品指數": ["DBC", "^CRB"],
+    "Corn 玉米": ["ZC=F"],
+    "Wheat 小麥": ["ZW=F"],
+    "Soybean 黃豆": ["ZS=F"],
+    "Cotton 棉花": ["CT=F"],
     # 其他商品 / 指標
-    "DXY 美元指數": "DX-Y.NYB",
-    "BDIY波羅的海指數": "BDRY",  # 改用 BDI 散裝運價 ETF BDRY
-    "VIX 指數": "^VIX",
-    "VXN 指數": "^VXN",
-    "美國10年公債殖利率": "^TNX",
+    "DXY 美元指數": ["DX-Y.NYB"],
+    "BDIY波羅的海指數": ["BDRY", "BDI"],
+    "VIX 指數": ["^VIX"],
+    "VXN 指數": ["^VXN"],
+    "美國10年公債殖利率": ["^TNX"],
 }
+
+
+def fetch_single_ticker_data(ticker_list, start_dt, end_dt):
+    """嘗試從備援代碼列表中抓取第一筆有效的歷史收盤數據"""
+    for symbol in ticker_list:
+        try:
+            stock = yf.Ticker(symbol)
+            df = stock.history(start=start_dt, end=end_dt)
+            df = df[df["Close"].notna()]
+            if len(df) >= 2:
+                c = df["Close"].iloc[-1]
+                p = df["Close"].iloc[-2]
+                if not math.isnan(c) and not math.isnan(p):
+                    chg = c - p
+                    pct = (chg / p) * 100
+                    return (f"{c:,.2f}", f"{chg:+,.2f}", f"{pct:+,.2f}%", pct)
+            elif len(df) == 1:
+                c = df["Close"].iloc[0]
+                if not math.isnan(c):
+                    return (f"{c:,.2f}", "-", "-", 0)
+        except Exception:
+            continue
+    return ("-", "-", "-", 0)
 
 
 @st.cache_data(ttl=1800)
 def get_market_data(target_date):
     results = {}
-    # 回溯 15 天以防連續連假（如農曆年、春節、長假）
-    start_dt = target_date - datetime.timedelta(days=15)
+    start_dt = target_date - datetime.timedelta(days=20)
     end_dt = target_date + datetime.timedelta(days=1)
 
-    for name, ticker in TICKERS.items():
-        try:
-            stock = yf.Ticker(ticker)
-            df = stock.history(start=start_dt, end=end_dt)
-
-            # 過濾無效 Close 資料
-            df = df[df["Close"].notna()]
-
-            if len(df) >= 2:
-                c = df["Close"].iloc[-1]
-                p = df["Close"].iloc[-2]
-
-                if math.isnan(c) or math.isnan(p):
-                    results[name] = ("-", "-", "-", 0)
-                else:
-                    chg = c - p
-                    pct = (chg / p) * 100
-                    results[name] = (
-                        f"{c:,.2f}",
-                        f"{chg:+,.2f}",
-                        f"{pct:+,.2f}%",
-                        pct,
-                    )
-            elif len(df) == 1:
-                c = df["Close"].iloc[0]
-                results[name] = (f"{c:,.2f}", "-", "-", 0)
-            else:
-                results[name] = ("-", "-", "-", 0)
-        except Exception:
-            results[name] = ("-", "-", "-", 0)
+    for name, ticker_list in TICKERS_CONFIG.items():
+        results[name] = fetch_single_ticker_data(ticker_list, start_dt, end_dt)
 
     return results
 
@@ -118,7 +112,7 @@ def get_market_data(target_date):
 data = get_market_data(selected_date)
 
 
-# 產生單一項目 4 個 <td> 的 HTML
+# 產生單一項目 4 個 <td> 的 HTML 儲存格
 def cell(item_name):
     if item_name not in data or data[item_name][0] == "-":
         return f"<td class='item-name'>{item_name}</td><td>-</td><td>-</td><td>-</td>"
@@ -332,4 +326,4 @@ full_html = f"""
 # ---------------------------------------------------------
 # 4. 渲染至 Streamlit
 # ---------------------------------------------------------
-components.html(full_html, height=720, scrolling=True)
+components.html(full_html, height=730, scrolling=True)
