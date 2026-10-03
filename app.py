@@ -1,125 +1,387 @@
-from datetime import datetime
+import datetime
+import json
+import math
+import urllib.request
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 import yfinance as yf
 
-# ---------------------------------------------------------
-# 1. 頁面佈局與標題
-# ---------------------------------------------------------
-st.set_page_config(
-    page_title="TIS晨報 - 重要市場收盤表現",
-    layout="wide",
-)
+st.set_page_config(page_title="TIS晨報 - 重要市場收盤表現", layout="wide")
 
+# ---------------------------------------------------------
+# 1. 介面控制區：日期選擇
+# ---------------------------------------------------------
 st.title("TIS晨報 - 重要市場收盤表現")
 
+today = datetime.date.today()
+selected_date = st.date_input(
+    "請選擇查詢日期（預設為最新）：",
+    value=today,
+    max_value=today,
+)
+
 # ---------------------------------------------------------
-# 2. 市場類別與對應 Ticker (含多重備援代碼)
+# 2. 定義指數代碼與備援抓取機制
 # ---------------------------------------------------------
-MARKET_INDEXES = {
-    "美國 / 歐洲市場": {
-        "道瓊工業指數": ["^DJI"],
-        "那斯達克指數": ["^IXIC"],
-        "標普500指數": ["^GSPC"],
-        "費城半導體指數": ["^SOX"],
-        "羅素2000指數": ["^RUT"],
-        "英國FTSE 100": ["^FTSE"],
-        "德國DAX指數": ["^GDAXI"],
-        "法國CAC指數": ["^FCHI"],
-        "道瓊歐洲600指數": ["^STOXX"],
-    },
-    "亞洲市場": {
-        "日經225指數": ["^N225"],
-        "南韓KOSPI指數": ["^KS11"],
-        "恆生指數": ["^HSI"],
-        "上證指數": ["000001.SS"],
-        "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],
-        "新加坡STI指數": ["^STI"],
-        "泰國曼谷SET指數": ["^SET.BK", "^SET"],
-        "富時馬來西亞指數": ["^KLSE"],
-        "印尼雅加達指數": ["^JKSE"],
-    },
-    "台灣市場": {
-        "加權指數": ["^TWII"],
-        "不含電子指數": ["^TW28", "0052.TW"],
-        "上櫃指數": ["^OTC", "^TWO", "006201.TWO"],
-        "0050": ["0050.TW"],
-        "0051": ["0051.TW"],
-    },
+TICKERS_CONFIG = {
+    # 美國 & 歐洲
+    "道瓊工業指數": ["^DJI"],
+    "那斯達克指數": ["^IXIC"],
+    "標普500指數": ["^GSPC"],
+    "費城半導體指數": ["^SOX"],
+    "羅素2000指數": ["^RUT"],
+    "英國FTSE 100": ["^FTSE"],
+    "德國DAX指數": ["^GDAXI"],
+    "法國CAC指數": ["^FCHI"],
+    "道瓊歐洲600指數": ["^STOXX"],
+    # 亞洲
+    "日經225指數": ["^N225"],
+    "南韓KOSPI指數": ["^KS11"],
+    "恆生指數": ["^HSI"],
+    "上證指數": ["000001.SS"],
+    "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],
+    "新加坡STI指數": ["^STI"],
+    "泰國曼谷SET指數": ["^SET.BK", "^SET"],
+    "富時馬來西亞指數": ["^KLSE"],
+    "印尼雅加達指數": ["^JKSE"],
+    # 台灣 & 國際指數
+    "加權指數": ["^TWII"],
+    "不含電子指數": ["^TW28", "0052.TW"],
+    "上櫃指數": ["^OTC", "^TWO", "^TWOII", "006201.TWO"],
+    "0050": ["0050.TW"],
+    "0051": ["0051.TW"],
+    "MSCI全球指數": ["URTH"],
+    "歐洲Stoxx 50": ["^STOXX50E"],
+    "MSCI新興市場": ["EEM"],
+    "MSCI拉丁美洲": ["ILF"],
+    # 金屬能源
+    "Crude Oil 原油": ["CL=F"],
+    "Natural Gas 天然氣": ["NG=F"],
+    "Gold 黃金": ["GC=F"],
+    "Silver 白銀": ["SI=F"],
+    "Copper 銅": ["HG=F"],
+    # 農作物商品
+    "CRB 商品指數": ["DBC", "^CRB"],
+    "Corn 玉米": ["ZC=F"],
+    "Wheat 小麥": ["ZW=F"],
+    "Soybean 黃豆": ["ZS=F"],
+    "Cotton 棉花": ["CT=F"],
+    # 其他商品 / 指標
+    "DXY 美元指數": ["DX-Y.NYB"],
+    "BDIY波羅的海指數": ["BDRY", "BDI"],
+    "VIX 指數": ["^VIX"],
+    "VXN 指數": ["^VXN"],
+    "美國10年公債殖利率": ["^TNX"],
 }
 
 
-# ---------------------------------------------------------
-# 3. 資料抓取與 fallback 處理 (回溯 10 天防休市/連假)
-# ---------------------------------------------------------
-@st.cache_data(ttl=1800)
-def fetch_ticker_data_with_fallback(symbol_list):
-    for symbol in symbol_list:
+def fetch_otc_direct():
+    """備援：直接抓取台灣櫃買中心 API"""
+    try:
+        url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            if "aaData" in res_data and len(res_data["aaData"]) > 0:
+                latest = res_data["aaData"][0]
+                close_val = float(latest[1].replace(",", ""))
+                chg_val = float(latest[2].replace(",", ""))
+                prev_val = close_val - chg_val
+                pct = (chg_val / prev_val) * 100
+                return (
+                    f"{close_val:,.2f}",
+                    f"{chg_val:+,.2f}",
+                    f"{pct:+,.2f}%",
+                    pct,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def fetch_single_ticker_data(item_name, ticker_list, start_dt, end_dt):
+    """嘗試從多個代碼抓取數據，若失敗則調用專屬備援"""
+    for symbol in ticker_list:
         try:
-            ticker = yf.Ticker(symbol)
-            df = ticker.history(period="10d")  # 抓取 10 天，確保跨連假仍能取得有效歷史數據
+            stock = yf.Ticker(symbol)
+            df = stock.history(start=start_dt, end=end_dt)
             df = df[df["Close"].notna()]
-
             if len(df) >= 2:
-                price = df["Close"].iloc[-1]
-                prev_close = df["Close"].iloc[-2]
-                change = price - prev_close
-                pct = (change / prev_close) * 100
-
-                sign = "+" if change > 0 else ""
-                return {
-                    "price": f"{price:,.2f}",
-                    "change": f"{sign}{change:,.2f}" if change != 0 else "0.00",
-                    "pct": f"{sign}{pct:.2f}%" if pct != 0 else "0.00%",
-                }
+                c = df["Close"].iloc[-1]
+                p = df["Close"].iloc[-2]
+                if not math.isnan(c) and not math.isnan(p):
+                    chg = c - p
+                    pct = (chg / p) * 100
+                    return (f"{c:,.2f}", f"{chg:+,.2f}", f"{pct:+,.2f}%", pct)
             elif len(df) == 1:
-                price = df["Close"].iloc[0]
-                return {
-                    "price": f"{price:,.2f}",
-                    "change": "0.00",
-                    "pct": "0.00%",
-                }
+                c = df["Close"].iloc[0]
+                if not math.isnan(c):
+                    return (f"{c:,.2f}", "-", "-", 0)
         except Exception:
             continue
 
-    return {"price": "-", "change": "-", "pct": "-"}
+    if item_name == "上櫃指數":
+        otc_res = fetch_otc_direct()
+        if otc_res:
+            return otc_res
+
+    return ("-", "-", "-", 0)
 
 
-def generate_market_table(market_dict):
-    data_list = []
-    for name, symbols in market_dict.items():
-        res = fetch_ticker_data_with_fallback(symbols)
-        data_list.append(
-            {
-                "指數": name,
-                "收盤價": res["price"],
-                "變動": res["change"],
-                "(%)": res["pct"],
-            }
+@st.cache_data(ttl=1800)
+def get_market_data(target_date):
+    results = {}
+    start_dt = target_date - datetime.timedelta(days=20)
+    end_dt = target_date + datetime.timedelta(days=1)
+
+    for name, ticker_list in TICKERS_CONFIG.items():
+        results[name] = fetch_single_ticker_data(
+            name, ticker_list, start_dt, end_dt
         )
-    return pd.DataFrame(data_list)
+
+    return results
+
+
+data = get_market_data(selected_date)
+
+
+# 產生單一項目 4 個 <td> 的 HTML 儲存格
+def cell(item_name):
+    if item_name not in data or data[item_name][0] == "-":
+        return f"<td class='item-name'>{item_name}</td><td class='num-val'>-</td><td class='num-val'>-</td><td class='num-val'>-</td>"
+
+    val, chg, pct_str, raw_pct = data[item_name]
+    if raw_pct > 0:
+        color = "#DC2626"  # 上漲紅
+    elif raw_pct < 0:
+        color = "#16A34A"  # 下跌綠
+    else:
+        color = "#000000"
+
+    return (
+        f"<td class='item-name'>{item_name}</td>"
+        f"<td class='num-val'>{val}</td>"
+        f"<td class='num-val' style='color:{color};'>{chg}</td>"
+        f"<td class='num-val' style='color:{color};'>{pct_str}</td>"
+    )
 
 
 # ---------------------------------------------------------
-# 4. 三欄式畫面排版呈現
+# 3. 構建表格 HTML (完全恢復深藍 HTML 大表格 + 精確欄位對齊)
 # ---------------------------------------------------------
-col1, col2, col3 = st.columns(3)
+date_str = selected_date.strftime("%Y/%m/%d")
 
-with col1:
-    st.subheader("🇺🇸 美國 / 歐洲市場")
-    df_us = generate_market_table(MARKET_INDEXES["美國 / 歐洲市場"])
-    st.dataframe(df_us, hide_index=True, use_container_width=True)
+full_html = f"""
+<!DOCTYPE html>
+<html>
+<head>
+<style>
+    body {{
+        font-family: "Microsoft JhengHei", "PingFang TC", Arial, sans-serif;
+        margin: 0;
+        padding: 5px;
+        background-color: #ffffff;
+    }}
+    .sub-title {{
+        color: #333;
+        font-size: 14px;
+        margin-bottom: 10px;
+        font-weight: bold;
+    }}
+    .tis-table {{
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 12px;
+        table-layout: fixed; /* 強制嚴格依照 colgroup 寬度分配 */
+    }}
+    .tis-table th {{
+        background-color: #002060;
+        color: #ffffff;
+        padding: 6px 2px;
+        border: 1px solid #002060;
+        font-weight: bold;
+    }}
+    .th-center {{ text-align: center; }}
+    .th-right {{ text-align: right; padding-right: 5px; }}
 
-with col2:
-    st.subheader("🌏 亞洲市場")
-    df_asia = generate_market_table(MARKET_INDEXES["亞洲市場"])
-    st.dataframe(df_asia, hide_index=True, use_container_width=True)
+    .tis-table td {{
+        padding: 4px 3px;
+        border: 1px solid #d0d0d0;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }}
+    .side-header {{
+        background-color: #002060;
+        color: #ffffff;
+        font-weight: bold;
+        text-align: center;
+        vertical-align: middle;
+        line-height: 1.2;
+    }}
+    .item-name {{
+        text-align: left;
+        padding-left: 4px;
+    }}
+    .num-val {{
+        text-align: right;
+        padding-right: 5px;
+    }}
+</style>
+</head>
+<body>
 
-with col3:
-    st.subheader("🇹🇼 台灣市場")
-    df_tw = generate_market_table(MARKET_INDEXES["台灣市場"])
-    st.dataframe(df_tw, hide_index=True, use_container_width=True)
+<div class='sub-title'>基準日期：{date_str}</div>
 
-st.caption(
-    f"基準日期 / 更新時間：{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-)
+<table class='tis-table'>
+    <!-- 精確分配 15 個欄位的寬度 (3個大組，每組5欄) -->
+    <colgroup>
+        <col style="width: 2.5%;"> <!-- 側欄標題 (如：美國) -->
+        <col style="width: 11.5%;"> <!-- 指數名稱 -->
+        <col style="width: 7.0%;">  <!-- 收盤價 -->
+        <col style="width: 6.2%;">  <!-- 變動 -->
+        <col style="width: 6.2%;">  <!-- (%) -->
+
+        <col style="width: 2.5%;">
+        <col style="width: 11.5%;">
+        <col style="width: 7.0%;">
+        <col style="width: 6.2%;">
+        <col style="width: 6.2%;">
+
+        <col style="width: 2.5%;">
+        <col style="width: 11.5%;">
+        <col style="width: 7.0%;">
+        <col style="width: 6.2%;">
+        <col style="width: 6.2%;">
+    </colgroup>
+
+    <!-- 表頭 (對齊下方資料：收盤價/變動/(%) 為右對齊) -->
+    <tr>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+    </tr>
+
+    <!-- 第 1 列 -->
+    <tr>
+        <td class='side-header' rowspan='5'>美<br>國</td>
+        {cell('道瓊工業指數')}
+        <td class='side-header' rowspan='9'>亞<br>洲</td>
+        {cell('日經225指數')}
+        <td class='side-header' rowspan='5'>台<br>灣</td>
+        {cell('加權指數')}
+    </tr>
+
+    <!-- 第 2 列 -->
+    <tr>
+        {cell('那斯達克指數')}
+        {cell('南韓KOSPI指數')}
+        {cell('不含電子指數')}
+    </tr>
+
+    <!-- 第 3 列 -->
+    <tr>
+        {cell('標普500指數')}
+        {cell('恆生指數')}
+        {cell('上櫃指數')}
+    </tr>
+
+    <!-- 第 4 列 -->
+    <tr>
+        {cell('費城半導體指數')}
+        {cell('上證指數')}
+        {cell('0050')}
+    </tr>
+
+    <!-- 第 5 列 (亞洲順序：上證指數下方為滬深300指數) -->
+    <tr>
+        {cell('羅素2000指數')}
+        {cell('滬深300指數')}
+        {cell('0051')}
+    </tr>
+
+    <!-- 第 6 列 -->
+    <tr>
+        <td class='side-header' rowspan='4'>歐<br>洲</td>
+        {cell('英國FTSE 100')}
+        {cell('新加坡STI指數')}
+        <td class='side-header' rowspan='4'>國<br>際<br>指<br>數</td>
+        {cell('MSCI全球指數')}
+    </tr>
+
+    <!-- 第 7 列 -->
+    <tr>
+        {cell('德國DAX指數')}
+        {cell('泰國曼谷SET指數')}
+        {cell('歐洲Stoxx 50')}
+    </tr>
+
+    <!-- 第 8 列 -->
+    <tr>
+        {cell('法國CAC指數')}
+        {cell('富時馬來西亞指數')}
+        {cell('MSCI新興市場')}
+    </tr>
+
+    <!-- 第 9 列 -->
+    <tr>
+        {cell('道瓊歐洲600指數')}
+        {cell('印尼雅加達指數')}
+        {cell('MSCI拉丁美洲')}
+    </tr>
+
+    <!-- 下半部商品標頭 -->
+    <tr style='border-top: 3px solid #002060;'>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+    </tr>
+
+    <!-- 第 10 列 -->
+    <tr>
+        <td class='side-header' rowspan='5'>金<br>屬<br>能<br>源</td>
+        {cell('Crude Oil 原油')}
+        <td class='side-header' rowspan='5'>農<br>作<br>商<br>品</td>
+        {cell('CRB 商品指數')}
+        <td class='side-header' rowspan='5'>其<br>他<br>商<br>品</td>
+        {cell('DXY 美元指數')}
+    </tr>
+
+    <!-- 第 11 列 -->
+    <tr>
+        {cell('Natural Gas 天然氣')}
+        {cell('Corn 玉米')}
+        {cell('BDIY波羅的海指數')}
+    </tr>
+
+    <!-- 第 12 列 -->
+    <tr>
+        {cell('Gold 黃金')}
+        {cell('Wheat 小麥')}
+        {cell('VIX 指數')}
+    </tr>
+
+    <!-- 第 13 列 -->
+    <tr>
+        {cell('Silver 白銀')}
+        {cell('Soybean 黃豆')}
+        {cell('VXN 指數')}
+    </tr>
+
+    <!-- 第 14 列 -->
+    <tr>
+        {cell('Copper 銅')}
+        {cell('Cotton 棉花')}
+        {cell('美國10年公債殖利率')}
+    </tr>
+</table>
+
+</body>
+</html>
+"""
+
+# ---------------------------------------------------------
+# 4. 渲染至 Streamlit
+# ---------------------------------------------------------
+components.html(full_html, height=730, scrolling=True)
