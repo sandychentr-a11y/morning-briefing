@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼配置 (多重 Fallback 代碼)
+# 2. 定義指數代碼配置
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -40,9 +40,9 @@ TICKERS_CONFIG = {
     "南韓KOSPI指數": ["^KS11"],
     "恆生指數": ["^HSI"],
     "上證指數": ["000001.SS"],
-    "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],
+    "滬深300指數": ["WEB_DIRECT_000300", "000300.SS", "399300.SZ"],  # 啟用直連 Web API
     "新加坡STI指數": ["^STI"],
-    "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
+    "泰國曼谷SET指數": ["WEB_DIRECT_SET", "^SET.BK", "^SET"],      # 啟用直連 Web API
     "富時馬來西亞指數": ["^KLSE"],
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
@@ -76,15 +76,71 @@ TICKERS_CONFIG = {
 }
 
 
+def fetch_yahoo_web_chart_api(symbol, target_date):
+    """
+    專屬 Web API：直接向 Yahoo Finance v8 Chart API 請求歷史 K 線數據
+    突破 yfinance 套件對滬深300 (000300.SS) 與泰國SET (^SET.BK) 的抓取限制
+    """
+    try:
+        # 轉換 target_date 為 Timestamp 區間
+        end_ts = int(datetime.datetime.combine(target_date + datetime.timedelta(days=2), datetime.time.max).timestamp())
+        start_ts = int(datetime.datetime.combine(target_date - datetime.timedelta(days=30), datetime.time.min).timestamp())
+
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?period1={start_ts}&period2={end_ts}&interval=1d"
+        req = urllib.request.Request(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_json = json.loads(response.read().decode("utf-8"))
+            result = res_json["chart"]["result"][0]
+            timestamps = result["timestamp"]
+            closes = result["indicators"]["quote"][0]["close"]
+
+            # 組成 DataFrame
+            dates = [datetime.datetime.fromtimestamp(ts).date() for ts in timestamps]
+            df = pd.DataFrame({"Date": dates, "Close": closes}).dropna()
+            df = df[df["Close"] > 0]
+
+            df_filtered = df[df["Date"] <= target_date]
+            if len(df_filtered) == 0:
+                df_filtered = df
+
+            latest_traded_date = df_filtered["Date"].iloc[-1]
+            latest_price = df_filtered["Close"].iloc[-1]
+
+            # 判斷是否休市
+            is_closed = False
+            if target_date.weekday() >= 5:
+                is_closed = True
+            elif target_date not in df_filtered["Date"].values:
+                days_diff = (target_date - latest_traded_date).days
+                if days_diff >= 1:
+                    is_closed = True
+
+            if is_closed:
+                return (f"{latest_price:,.2f}", "休市", "休市", 0, True)
+
+            if len(df_filtered) >= 2:
+                c = df_filtered["Close"].iloc[-1]
+                p = df_filtered["Close"].iloc[-2]
+                chg = c - p
+                pct = (chg / p) * 100 if p != 0 else 0
+                return (f"{c:,.2f}", f"{chg:+,.2f}", f"{pct:+,.2f}%", pct, False)
+            elif len(df_filtered) == 1:
+                return (f"{latest_price:,.2f}", "0.00", "0.00%", 0, False)
+    except Exception:
+        pass
+    return None
+
+
 def fetch_otc_from_tpex(target_date):
     """專屬 API：直接抓取台灣櫃買中心 (TPEx) 官方數據"""
     try:
         url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
         req = urllib.request.Request(
             url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
+            headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
         )
         with urllib.request.urlopen(req, timeout=5) as response:
             res_data = json.loads(response.read().decode("utf-8"))
@@ -98,30 +154,31 @@ def fetch_otc_from_tpex(target_date):
                 if target_date.weekday() >= 5:
                     return (f"{close_val:,.2f}", "休市", "休市", 0, True)
 
-                return (
-                    f"{close_val:,.2f}",
-                    f"{chg_val:+,.2f}",
-                    f"{pct:+,.2f}%",
-                    pct,
-                    False,
-                )
+                return (f"{close_val:,.2f}", f"{chg_val:+,.2f}", f"{pct:+,.2f}%", pct, False)
     except Exception:
         pass
     return None
 
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
-    """
-    強健資料抓取邏輯：
-    1. 使用 60d 充足歷史，保證計算出真正漲跌金額[cite: 11]。
-    2. 精確判斷國定假日休市與週末[cite: 11]。
-    """
     if item_name == "上櫃指數" and target_date == datetime.date.today():
         tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
             return tpex_res
 
     for symbol in ticker_list:
+        if symbol == "WEB_DIRECT_000300":
+            res = fetch_yahoo_web_chart_api("000300.SS", target_date)
+            if res:
+                return res
+            continue
+
+        if symbol == "WEB_DIRECT_SET":
+            res = fetch_yahoo_web_chart_api("^SET.BK", target_date)
+            if res:
+                return res
+            continue
+
         if symbol == "TPEX_DIRECT":
             tpex_res = fetch_otc_from_tpex(target_date)
             if tpex_res:
@@ -130,20 +187,16 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
 
         try:
             stock = yf.Ticker(symbol)
-            # 拉長搜尋 window 至 60 天，確保至少有 2 筆以上的有效 K 線
             df = stock.history(period="60d")
-
             df = df[df["Close"].notna()]
             if len(df) == 0:
                 continue
 
-            # 抹平時區差異，統一樣式
             try:
                 df.index = df.index.tz_convert("Asia/Taipei").date
             except Exception:
                 df.index = pd.to_datetime(df.index).date
 
-            # 擷取截至 target_date 當天或之前的所有紀錄
             df_filtered = df[df.index <= target_date]
             if len(df_filtered) == 0:
                 df_filtered = df
@@ -151,46 +204,30 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             latest_traded_date = df_filtered.index[-1]
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 判斷是否休市
             is_closed = False
             if target_date.weekday() >= 5:
                 is_closed = True
             elif target_date not in df_filtered.index:
-                # 國定連假（如十一黃金週）
                 days_diff = (target_date - latest_traded_date).days
                 if days_diff >= 1 and item_name in ["上證指數", "滬深300指數"]:
                     is_closed = True
 
             if is_closed:
-                return (
-                    f"{latest_price:,.2f}",
-                    "休市",
-                    "休市",
-                    0,
-                    True,
-                )
+                return (f"{latest_price:,.2f}", "休市", "休市", 0, True)
 
-            # 當天開盤正常交易：計算最後兩筆燭台變動
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
                 if not math.isnan(c) and not math.isnan(p) and p != 0:
                     chg = c - p
                     pct = (chg / p) * 100
-                    return (
-                        f"{c:,.2f}",
-                        f"{chg:+,.2f}",
-                        f"{pct:+,.2f}%",
-                        pct,
-                        False,
-                    )
+                    return (f"{c:,.2f}", f"{chg:+,.2f}", f"{pct:+,.2f}%", pct, False)
             elif len(df_filtered) == 1:
                 return (f"{latest_price:,.2f}", "0.00", "0.00%", 0, False)
 
         except Exception:
             continue
 
-    # 備援機制
     if item_name == "上櫃指數":
         tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
