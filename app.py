@@ -1,6 +1,7 @@
 import datetime
 import json
 import math
+import re
 import urllib.request
 import pandas as pd
 import streamlit as st
@@ -22,7 +23,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼配置 (含 Fallback 備援代碼)
+# 2. 定義指數代碼與備援抓取機制
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -48,7 +49,13 @@ TICKERS_CONFIG = {
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": ["TPEX_DIRECT", "^TWOII", "^TWO", "^OTC", "006201.TWO"],
+    "上櫃指數": [
+        "YAHOO_TW_OTC",
+        "TPEX_DIRECT",
+        "006201.TWO",
+        "^TWOII",
+        "^TWO",
+    ],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -76,8 +83,49 @@ TICKERS_CONFIG = {
 }
 
 
-def fetch_otc_from_tpex():
-    """專屬 API：直接抓取台灣櫃買中心 (TPEx) 官方最新數據"""
+def fetch_yahoo_tw_otc():
+    """優先方案：直接爬取 Yahoo 奇摩股市（Yahoo 台灣）的上櫃指數網頁 API"""
+    try:
+        url = "https://tw.stock.yahoo.com/quote/%5ETWOII"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            html = response.read().decode("utf-8")
+            # 搜尋價格區塊 (Regex)
+            price_match = re.search(
+                r'"price"\s*:\s*"?([0-9]+\.?[0-9]*)"?', html
+            )
+            change_match = re.search(
+                r'"priceChange"\s*:\s*"?(-?[0-9]+\.?[0-9]*)"?', html
+            )
+            pct_match = re.search(
+                r'"priceChangePercent"\s*:\s*"?(-?[0-9]+\.?[0-9]*)"?', html
+            )
+
+            if price_match:
+                close_val = float(price_match.group(1))
+                chg_val = (
+                    float(change_match.group(1)) if change_match else 0.0
+                )
+                pct_val = float(pct_match.group(1)) if pct_match else 0.0
+                return (
+                    f"{close_val:,.2f}",
+                    f"{chg_val:+,.2f}",
+                    f"{pct_val:+,.2f}%",
+                    pct_val,
+                    False,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def fetch_tpex_direct():
+    """備援方案一：直接抓取台灣櫃買中心 (TPEx) 官方 API"""
     try:
         url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
         req = urllib.request.Request(
@@ -108,20 +156,31 @@ def fetch_otc_from_tpex():
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
-    資料抓取核心邏輯：
-    1. 價格：帶入最新一個交易日收盤價。
-    2. 變動與漲跌幅：若選擇的 target_date 當天無交易（休市/週末/國定假日），則顯示「休市」。
+    抓取核心邏輯：
+    1. 專屬指數（如上櫃指數）先跑 Yahoo 台灣與櫃買官方 API[cite: 10]。
+    2. 萬一休市或假日，無條件遞補最近一天的收盤價格，變動與 % 顯示「休市」。
     """
-    if item_name == "上櫃指數" and target_date == datetime.date.today():
-        tpex_res = fetch_otc_from_tpex()
-        if tpex_res:
-            return tpex_res
+    if item_name == "上櫃指數":
+        res_ytw = fetch_yahoo_tw_otc()
+        if res_ytw:
+            return res_ytw
+        res_tpex = fetch_tpex_direct()
+        if res_tpex:
+            return res_tpex
 
     start_dt = target_date - datetime.timedelta(days=30)
     end_dt = target_date + datetime.timedelta(days=1)
 
     for symbol in ticker_list:
+        if symbol == "YAHOO_TW_OTC":
+            res = fetch_yahoo_tw_otc()
+            if res:
+                return res
+            continue
         if symbol == "TPEX_DIRECT":
+            res = fetch_tpex_direct()
+            if res:
+                return res
             continue
 
         try:
@@ -134,24 +193,20 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             if len(df) == 0:
                 continue
 
-            # 將索引時間轉換為純 Date 格式
             df.index = pd.to_datetime(df.index).date
-
-            # 過濾小於等於 target_date 的數據
             df_filtered = df[df.index <= target_date]
 
             if len(df_filtered) == 0:
-                # 若選取的日期比歷史紀錄還早，退回使用全數據
-                df_filtered = df
+                df_filtered = df  # 自動退回取最新有效數據
 
             latest_traded_date = df_filtered.index[-1]
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 判斷 target_date 當天是否休市（選擇當天沒有實際交易 Candle 資料）
+            # 判斷 target_date 當天是否休市
             is_closed = latest_traded_date != target_date
 
             if is_closed:
-                # 當天休市：顯示最新價格，變動與 % 顯示「休市」
+                # 休市：價格填最新，變動呈現休市
                 return (
                     f"{latest_price:,.2f}",
                     "休市",
@@ -160,7 +215,6 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
                     True,
                 )
 
-            # 正常交易日計算漲跌金額與幅度
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
@@ -180,11 +234,11 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
         except Exception:
             continue
 
-    # 針對上櫃指數之備援
+    # 最後備援
     if item_name == "上櫃指數":
-        tpex_res = fetch_otc_from_tpex()
-        if tpex_res:
-            return tpex_res
+        res_tpex = fetch_tpex_direct()
+        if res_tpex:
+            return res_tpex
 
     return ("-", "-", "-", 0, False)
 
