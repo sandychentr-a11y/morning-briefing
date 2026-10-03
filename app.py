@@ -40,7 +40,7 @@ TICKERS_CONFIG = {
     "南韓KOSPI指數": ["^KS11"],
     "恆生指數": ["^HSI"],
     "上證指數": ["000001.SS"],
-    "滬深300指數": ["000300.SS", "399300.SZ"],  # 使用原生滬深300指數代碼
+    "滬深300指數": ["000300.SS", "399300.SZ"],
     "新加坡STI指數": ["^STI"],
     "泰國曼谷SET指數": ["^SET.BK", "^SET"],
     "富時馬來西亞指數": ["^KLSE"],
@@ -48,7 +48,7 @@ TICKERS_CONFIG = {
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": ["^OTC", "^TWO", "^TWOII"],
+    "上櫃指數": ["OTC_DIRECT", "^TWOII", "006201.TWO"],  # 啟用櫃買中心官方直連
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -76,16 +76,60 @@ TICKERS_CONFIG = {
 }
 
 
+def fetch_otc_from_tpex():
+    """專屬 API：直接抓取台灣證券櫃檯買賣中心 (TPEx) 官方上櫃指數數據"""
+    try:
+        url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
+        req = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            },
+        )
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            if "aaData" in res_data and len(res_data["aaData"]) > 0:
+                # aaData 第 0 筆即為櫃買指數 (OTC Index)
+                latest = res_data["aaData"][0]
+                close_val = float(latest[1].replace(",", ""))
+                chg_val = float(latest[2].replace(",", ""))
+                prev_val = close_val - chg_val
+                pct = (chg_val / prev_val) * 100
+                return (
+                    f"{close_val:,.2f}",
+                    f"{chg_val:+,.2f}",
+                    f"{pct:+,.2f}%",
+                    pct,
+                    False,
+                )
+    except Exception:
+        pass
+    return None
+
+
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
     抓取邏輯：
-    1. 計算 target_date 當天或往前最接近的交易日數據。
-    2. 若 target_date 當日為休市（例如長假無最新收盤數據），則取前一日數據，變動呈現「休市」。
+    1. 若為上櫃指數，優先使用櫃買中心官方 API 獲取準確即時數據[cite: 12]。
+    2. 其他指數依次嘗試 yfinance ticker。
+    3. 若遇長假/國定假日無當日數據，自動帶出最近交易日收盤價，變動顯示「休市」[cite: 11]。
     """
+    # 專屬防護：上櫃指數優先嘗試連線 TPEx 官方
+    if item_name == "上櫃指數" and target_date == datetime.date.today():
+        tpex_res = fetch_otc_from_tpex()
+        if tpex_res:
+            return tpex_res
+
     start_dt = target_date - datetime.timedelta(days=20)
     end_dt = target_date + datetime.timedelta(days=1)
 
     for symbol in ticker_list:
+        if symbol == "OTC_DIRECT":
+            tpex_res = fetch_otc_from_tpex()
+            if tpex_res:
+                return tpex_res
+            continue
+
         try:
             stock = yf.Ticker(symbol)
             df = stock.history(start=start_dt, end=end_dt)
@@ -94,10 +138,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             if len(df) == 0:
                 continue
 
-            # 檢查最新的交易日期是否落在 target_date (含當天)
-            last_date = df.index[-1].date()
-
-            # 若目標日期小於最後數據日，截斷資料
+            # 截斷至 target_date 以前的資料
             df_filtered = df[df.index.date <= target_date]
             if len(df_filtered) == 0:
                 continue
@@ -105,15 +146,12 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             latest_trade_date = df_filtered.index[-1].date()
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 判斷 target_date 當天是否休市（若距離最後交易日超過 0 天，但遇週末或假日視狀況）
-            # 如果選擇的日期沒有交易資料（例如陸股十一連假）：
+            # 判斷 target_date 是否休市（平日無當日交易紀錄）
             is_holiday = False
-            # 對於平日（週一至週五）但交易日落後的情況判定為休市
             if target_date.weekday() < 5 and latest_trade_date < target_date:
                 is_holiday = True
 
             if is_holiday:
-                # 顯示最後交易日收盤價，變動顯示休市
                 return (f"{latest_price:,.2f}", "休市", "休市", 0, True)
 
             if len(df_filtered) >= 2:
@@ -133,6 +171,12 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
 
         except Exception:
             continue
+
+    # 若特定日期的官方連線均超時，自動從備援二次嘗試 TPEx 官方
+    if item_name == "上櫃指數":
+        tpex_res = fetch_otc_from_tpex()
+        if tpex_res:
+            return tpex_res
 
     return ("-", "-", "-", 0, False)
 
@@ -156,7 +200,6 @@ def cell(item_name):
     val, chg, pct_str, raw_pct, is_holiday = data[item_name]
 
     if is_holiday:
-        # 休市狀態：文字顯示灰藍色或黑色
         return (
             f"<td class='item-name'>{item_name}</td>"
             f"<td class='num-val'>{val}</td>"
@@ -180,7 +223,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建深藍色 HTML 表格 (恢復原本深藍格式 + 休市自動處理)
+# 3. 構建深藍色 HTML 表格 (恢復深藍格式 + 固定欄位寬度)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
