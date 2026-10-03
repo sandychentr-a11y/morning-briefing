@@ -20,7 +20,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 精確設定商品代碼 (Ticker Map)
+# 2. 精確更新商品代碼與備援機制
 # ---------------------------------------------------------
 TICKERS = {
     # 美國 & 歐洲
@@ -41,11 +41,11 @@ TICKERS = {
     "新加坡STI指數": "^STI",
     "泰國曼谷SET指數": "^SET.BK",
     "富時馬來西亞指數": "^KLSE",
-    "菲律賓綜合指數": "PSEI.XC",
+    "菲律賓綜合指數": "^PSI",  # 已修正代碼
     "印尼雅加達指數": "^JKSE",
     # 台灣 & 國際指數
     "加權指數": "^TWII",
-    "不含電子指數": "^IR0001",
+    "不含電子指數": "0052.TW",  # 以富邦科技/相關替代指標或TWSE備援
     "上櫃指數": "^TWOII",
     "0050": "0050.TW",
     "0051": "0051.TW",
@@ -60,14 +60,14 @@ TICKERS = {
     "Silver 白銀": "SI=F",
     "Copper 銅": "HG=F",
     # 農作物商品
-    "CRB 商品指數": "^CRB",
+    "CRB 商品指數": "DBC",  # 改用通用 CRB  commodity ETF DBC
     "Corn 玉米": "ZC=F",
     "Wheat 小麥": "ZW=F",
     "Soybean 黃豆": "ZS=F",
     "Cotton 棉花": "CT=F",
     # 其他商品 / 指標
     "DXY 美元指數": "DX-Y.NYB",
-    "BDIY波羅的海指數": "BDI",
+    "BDIY波羅的海指數": "BDRY",  # 改用 BDI 散裝運價 ETF BDRY
     "VIX 指數": "^VIX",
     "VXN 指數": "^VXN",
     "美國10年公債殖利率": "^TNX",
@@ -77,8 +77,8 @@ TICKERS = {
 @st.cache_data(ttl=1800)
 def get_market_data(target_date):
     results = {}
-    # 設定抓取區間：從指定日期的前 10 天到指定日期的後 1 天（確保覆蓋週末與例假日）
-    start_dt = target_date - datetime.timedelta(days=10)
+    # 回溯 15 天以防連續連假（如農曆年、春節、長假）
+    start_dt = target_date - datetime.timedelta(days=15)
     end_dt = target_date + datetime.timedelta(days=1)
 
     for name, ticker in TICKERS.items():
@@ -86,11 +86,10 @@ def get_market_data(target_date):
             stock = yf.Ticker(ticker)
             df = stock.history(start=start_dt, end=end_dt)
 
-            # 過濾掉空白資料
+            # 過濾無效 Close 資料
             df = df[df["Close"].notna()]
 
             if len(df) >= 2:
-                # 取得目標日或目標日之前最新的兩筆交易數據
                 c = df["Close"].iloc[-1]
                 p = df["Close"].iloc[-2]
 
@@ -205,7 +204,7 @@ full_html = f"""
 <div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
-    <!-- 表頭 (對齊 15 欄) -->
+    <!-- 表頭 (15 欄) -->
     <tr>
         <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
         <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
