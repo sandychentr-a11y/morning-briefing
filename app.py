@@ -1,5 +1,7 @@
 import datetime
 import math
+import re
+import urllib.request
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -20,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼與備援列表 (Ticker Map with Fallbacks)
+# 2. 定義指數代碼配置 (含 Yahoo Taiwan / TWSE 備援)
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -45,7 +47,7 @@ TICKERS_CONFIG = {
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
-    "不含電子指數": ["^TW28", "0052.TW"],
+    "不含電子指數": ["^TW28", "0052.TW", "^IR0001"],
     "上櫃指數": ["^TWO", "^TWOII"],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
@@ -75,7 +77,7 @@ TICKERS_CONFIG = {
 
 
 def fetch_single_ticker_data(ticker_list, start_dt, end_dt):
-    """嘗試從備援代碼列表中抓取第一筆有效的歷史收盤數據"""
+    """嘗試從多個 API/備援代碼抓取數據"""
     for symbol in ticker_list:
         try:
             stock = yf.Ticker(symbol)
@@ -134,7 +136,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建精確對齊的 HTML 表格
+# 3. 構建精確對齊的 HTML 表格 (表頭文字對齊下方數字)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
@@ -164,13 +166,16 @@ full_html = f"""
     .tis-table th {{
         background-color: #002060;
         color: #ffffff;
-        padding: 6px 2px;
-        text-align: center;
+        padding: 6px 4px;
         border: 1px solid #002060;
         font-weight: bold;
     }}
+    /* 表頭對齊樣式 */
+    .th-center {{ text-align: center; }}
+    .th-right {{ text-align: right; }}
+
     .tis-table td {{
-        padding: 4px 3px;
+        padding: 4px 4px;
         border: 1px solid #d0d0d0;
         white-space: nowrap;
         overflow: hidden;
@@ -198,11 +203,11 @@ full_html = f"""
 <div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
-    <!-- 表頭 (15 欄) -->
+    <!-- 表頭 (對齊下方數字：收盤價/變動/(%) 設為 th-right) -->
     <tr>
-        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
     </tr>
 
     <!-- 第 1 列 -->
@@ -275,9 +280,9 @@ full_html = f"""
 
     <!-- 下半部商品標頭 -->
     <tr style='border-top: 3px solid #002060;'>
-        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
+        <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
     </tr>
 
     <!-- 第 10 列 -->
