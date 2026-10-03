@@ -76,7 +76,7 @@ TICKERS_CONFIG = {
 }
 
 
-def fetch_otc_from_tpex():
+def fetch_otc_from_tpex(target_date):
     """專屬 API：直接抓取台灣櫃買中心 (TPEx) 官方數據"""
     try:
         url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
@@ -94,6 +94,11 @@ def fetch_otc_from_tpex():
                 chg_val = float(str(latest[2]).replace(",", ""))
                 prev_val = close_val - chg_val
                 pct = (chg_val / prev_val) * 100 if prev_val != 0 else 0
+
+                # 週末或非當日判斷
+                if target_date.weekday() >= 5:
+                    return (f"{close_val:,.2f}", "休市", "休市", 0, True)
+
                 return (
                     f"{close_val:,.2f}",
                     f"{chg_val:+,.2f}",
@@ -108,21 +113,22 @@ def fetch_otc_from_tpex():
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
-    精確資料抓取邏輯：
-    1. 時區抹平：移除 yfinance 日期時區影響，解決台灣股票與美股跨時區誤判問題。
-    2. 真實休市判斷：僅當選擇日期距最新交易日相差大於 2 個非假日天數時（長假休市）才判定為休市。
+    全新精準休市判定邏輯：
+    只要 selected_date 當天無交易數據（無論週末、國慶連假或國定假日），
+    即判定為「休市」：價格呈現最近一交易日收盤價，變動與 (%) 顯示「休市」。
     """
     if item_name == "上櫃指數" and target_date == datetime.date.today():
-        tpex_res = fetch_otc_from_tpex()
+        tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
             return tpex_res
 
-    start_dt = target_date - datetime.timedelta(days=30)
+    # 抓取包含 target_date 前後的時間範圍
+    start_dt = target_date - datetime.timedelta(days=35)
     end_dt = target_date + datetime.timedelta(days=2)
 
     for symbol in ticker_list:
         if symbol == "TPEX_DIRECT":
-            tpex_res = fetch_otc_from_tpex()
+            tpex_res = fetch_otc_from_tpex(target_date)
             if tpex_res:
                 return tpex_res
             continue
@@ -131,7 +137,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             stock = yf.Ticker(symbol)
             df = stock.history(start=start_dt, end=end_dt)
             if df.empty:
-                df = stock.history(period="15d")
+                df = stock.history(period="1mo")
 
             df = df[df["Close"].notna()]
             if len(df) == 0:
@@ -140,24 +146,22 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             # 轉為不帶時區的標準 Date 格式
             df.index = pd.to_datetime(df.index).tz_localize(None).date
 
-            # 過濾小於等於 target_date 的資料
+            # 檢查 target_date 當天是否有交易 Candles
+            has_traded_today = target_date in df.index
+
+            # 過濾至 target_date 當天或更早的歷史數據
             df_filtered = df[df.index <= target_date]
 
             if len(df_filtered) == 0:
-                df_filtered = df  # 若無更早資料則退回使用最新資料
+                # 若選取的日期過早，退回取整體最新數據
+                df_filtered = df
+                has_traded_today = False
 
-            latest_traded_date = df_filtered.index[-1]
+            # 最新可取得的交易日收盤價
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 計算 target_date 與最新交易日之間的日曆天數差
-            days_diff = (target_date - latest_traded_date).days
-
-            # 僅在長假（例如平日且落後 2 天以上）時判定休市；週末不強制判定休市
-            is_holiday_market = False
-            if target_date.weekday() < 5 and days_diff >= 2:
-                is_holiday_market = True
-
-            if is_holiday_market and (item_name in ["上證指數", "滬深300指數"]):
+            # 核心判斷：若當天沒有交易資料 (包含週末或長假)
+            if not has_traded_today:
                 return (
                     f"{latest_price:,.2f}",
                     "休市",
@@ -166,7 +170,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
                     True,
                 )
 
-            # 正常交易日漲跌計算
+            # 當天有正常開盤交易：計算當天相對前一交易日的變動金額與漲跌幅
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
@@ -188,7 +192,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
 
     # 針對上櫃指數之備援
     if item_name == "上櫃指數":
-        tpex_res = fetch_otc_from_tpex()
+        tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
             return tpex_res
 
@@ -237,7 +241,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建深藍色 HTML 表格
+# 3. 構建深藍色 HTML 表格 (含下半部 Commodity 區域)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
