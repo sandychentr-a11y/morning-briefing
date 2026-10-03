@@ -1,6 +1,6 @@
 import datetime
+import json
 import math
-import re
 import urllib.request
 import pandas as pd
 import streamlit as st
@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼配置 (含 Yahoo Taiwan / TWSE 備援)
+# 2. 定義指數代碼與備援抓取機制
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -43,12 +43,12 @@ TICKERS_CONFIG = {
     "新加坡STI指數": ["^STI"],
     "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
     "富時馬來西亞指數": ["^KLSE"],
-    "菲律賓綜合指數": ["^PSI", "^PSEI", "PSEI.XC"],
+    "菲律賓綜合指數": ["PSEI.XC", "^PSI", "^PSEI", "EPH"],  # 多重備援
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
-    "不含電子指數": ["^TW28", "0052.TW", "^IR0001"],
-    "上櫃指數": ["^TWO", "^TWOII"],
+    "不含電子指數": ["^TW28", "0052.TW"],
+    "上櫃指數": ["^OTC", "^TWO", "^TWOII", "006201.TWO"],  # 修正 OTC 代碼
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -76,8 +76,33 @@ TICKERS_CONFIG = {
 }
 
 
-def fetch_single_ticker_data(ticker_list, start_dt, end_dt):
-    """嘗試從多個 API/備援代碼抓取數據"""
+def fetch_otc_direct():
+    """備援：直接抓取台灣櫃買中心 API"""
+    try:
+        url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=5) as response:
+            res_data = json.loads(response.read().decode("utf-8"))
+            if "aaData" in res_data and len(res_data["aaData"]) > 0:
+                # 取得最新一筆櫃買指數收盤價
+                latest = res_data["aaData"][0]
+                close_val = float(latest[1].replace(",", ""))
+                chg_val = float(latest[2].replace(",", ""))
+                prev_val = close_val - chg_val
+                pct = (chg_val / prev_val) * 100
+                return (
+                    f"{close_val:,.2f}",
+                    f"{chg_val:+,.2f}",
+                    f"{pct:+,.2f}%",
+                    pct,
+                )
+    except Exception:
+        pass
+    return None
+
+
+def fetch_single_ticker_data(item_name, ticker_list, start_dt, end_dt):
+    """嘗試從多個代碼抓取數據，若失敗則調用專屬備援"""
     for symbol in ticker_list:
         try:
             stock = yf.Ticker(symbol)
@@ -96,6 +121,13 @@ def fetch_single_ticker_data(ticker_list, start_dt, end_dt):
                     return (f"{c:,.2f}", "-", "-", 0)
         except Exception:
             continue
+
+    # 若 yfinance 抓取失敗，調用特定備援 API
+    if item_name == "上櫃指數":
+        otc_res = fetch_otc_direct()
+        if otc_res:
+            return otc_res
+
     return ("-", "-", "-", 0)
 
 
@@ -106,7 +138,9 @@ def get_market_data(target_date):
     end_dt = target_date + datetime.timedelta(days=1)
 
     for name, ticker_list in TICKERS_CONFIG.items():
-        results[name] = fetch_single_ticker_data(ticker_list, start_dt, end_dt)
+        results[name] = fetch_single_ticker_data(
+            name, ticker_list, start_dt, end_dt
+        )
 
     return results
 
@@ -117,7 +151,7 @@ data = get_market_data(selected_date)
 # 產生單一項目 4 個 <td> 的 HTML 儲存格
 def cell(item_name):
     if item_name not in data or data[item_name][0] == "-":
-        return f"<td class='item-name'>{item_name}</td><td>-</td><td>-</td><td>-</td>"
+        return f"<td class='item-name'>{item_name}</td><td class='num-val'>-</td><td class='num-val'>-</td><td class='num-val'>-</td>"
 
     val, chg, pct_str, raw_pct = data[item_name]
     if raw_pct > 0:
@@ -136,7 +170,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建精確對齊的 HTML 表格 (表頭文字對齊下方數字)
+# 3. 構建表格 HTML (加入欄位寬度鎖定，達成 100% 對齊)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
@@ -161,24 +195,24 @@ full_html = f"""
         width: 100%;
         border-collapse: collapse;
         font-size: 12px;
-        table-layout: fixed;
+        table-layout: fixed; /* 強制嚴格依照 column 寬度分配 */
     }}
     .tis-table th {{
         background-color: #002060;
         color: #ffffff;
-        padding: 6px 4px;
+        padding: 6px 2px;
         border: 1px solid #002060;
         font-weight: bold;
     }}
-    /* 表頭對齊樣式 */
     .th-center {{ text-align: center; }}
-    .th-right {{ text-align: right; }}
+    .th-right {{ text-align: right; padding-right: 5px; }}
 
     .tis-table td {{
-        padding: 4px 4px;
+        padding: 4px 3px;
         border: 1px solid #d0d0d0;
         white-space: nowrap;
         overflow: hidden;
+        text-overflow: ellipsis;
     }}
     .side-header {{
         background-color: #002060;
@@ -186,15 +220,15 @@ full_html = f"""
         font-weight: bold;
         text-align: center;
         vertical-align: middle;
-        width: 32px;
         line-height: 1.2;
     }}
     .item-name {{
         text-align: left;
-        width: 110px;
+        padding-left: 4px;
     }}
     .num-val {{
         text-align: right;
+        padding-right: 5px;
     }}
 </style>
 </head>
@@ -203,7 +237,28 @@ full_html = f"""
 <div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
-    <!-- 表頭 (對齊下方數字：收盤價/變動/(%) 設為 th-right) -->
+    <!-- 精確定義 15 個欄位的寬度比例，解決未對齊問題 -->
+    <colgroup>
+        <col style="width: 2.5%;"> <!-- 分類側欄 -->
+        <col style="width: 11%;">  <!-- 指數名稱 -->
+        <col style="width: 7.5%;">  <!-- 收盤價 -->
+        <col style="width: 6.2%;">  <!-- 變動 -->
+        <col style="width: 6.2%;">  <!-- (%) -->
+
+        <col style="width: 2.5%;">
+        <col style="width: 11%;">
+        <col style="width: 7.5%;">
+        <col style="width: 6.2%;">
+        <col style="width: 6.2%;">
+
+        <col style="width: 2.5%;">
+        <col style="width: 11%;">
+        <col style="width: 7.5%;">
+        <col style="width: 6.2%;">
+        <col style="width: 6.2%;">
+    </colgroup>
+
+    <!-- 表頭 -->
     <tr>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
