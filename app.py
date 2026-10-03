@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼配置 (含 Fallback 備援代碼)
+# 2. 定義指數代碼配置
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -95,7 +95,7 @@ def fetch_otc_from_tpex(target_date):
                 prev_val = close_val - chg_val
                 pct = (chg_val / prev_val) * 100 if prev_val != 0 else 0
 
-                # 週末或非當日判斷
+                # 週末判斷
                 if target_date.weekday() >= 5:
                     return (f"{close_val:,.2f}", "休市", "休市", 0, True)
 
@@ -113,16 +113,14 @@ def fetch_otc_from_tpex(target_date):
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
-    全新精準休市判定邏輯：
-    只要 selected_date 當天無交易數據（無論週末、國慶連假或國定假日），
-    即判定為「休市」：價格呈現最近一交易日收盤價，變動與 (%) 顯示「休市」。
+    強健資料抓取邏輯：
+    精確處理時區偏移，防止 0050/0051/不含電子指數在正常交易日被誤判為休市。
     """
     if item_name == "上櫃指數" and target_date == datetime.date.today():
         tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
             return tpex_res
 
-    # 抓取包含 target_date 前後的時間範圍
     start_dt = target_date - datetime.timedelta(days=35)
     end_dt = target_date + datetime.timedelta(days=2)
 
@@ -143,25 +141,34 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             if len(df) == 0:
                 continue
 
-            # 轉為不帶時區的標準 Date 格式
-            df.index = pd.to_datetime(df.index).tz_localize(None).date
+            # 時區處理：一律無條件正規化為日期物件 (.date)
+            try:
+                df.index = df.index.tz_convert("Asia/Taipei").date
+            except Exception:
+                df.index = pd.to_datetime(df.index).date
 
-            # 檢查 target_date 當天是否有交易 Candles
-            has_traded_today = target_date in df.index
-
-            # 過濾至 target_date 當天或更早的歷史數據
+            # 過濾至 target_date 當天或以前
             df_filtered = df[df.index <= target_date]
 
             if len(df_filtered) == 0:
-                # 若選取的日期過早，退回取整體最新數據
                 df_filtered = df
-                has_traded_today = False
 
-            # 最新可取得的交易日收盤價
+            latest_traded_date = df_filtered.index[-1]
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 核心判斷：若當天沒有交易資料 (包含週末或長假)
-            if not has_traded_today:
+            # 判斷是否休市的核心邏輯：
+            # 1. 如果選擇的日子是週末 (週六/週日) -> 判定為休市
+            # 2. 如果選擇的日子是平日，但資料庫最新的交易日比 target_date 落後 1 天以上（且差距不單純是剛好隔天）
+            is_closed = False
+            if target_date.weekday() >= 5:
+                is_closed = True
+            elif target_date not in df_filtered.index:
+                # 特定節假日休市（如陸股十一長假，平日無資料）
+                days_diff = (target_date - latest_traded_date).days
+                if days_diff >= 1 and item_name in ["上證指數", "滬深300指數"]:
+                    is_closed = True
+
+            if is_closed:
                 return (
                     f"{latest_price:,.2f}",
                     "休市",
@@ -170,7 +177,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
                     True,
                 )
 
-            # 當天有正常開盤交易：計算當天相對前一交易日的變動金額與漲跌幅
+            # 正常交易日漲跌計算
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
