@@ -40,15 +40,15 @@ TICKERS_CONFIG = {
     "南韓KOSPI指數": ["^KS11"],
     "恆生指數": ["^HSI"],
     "上證指數": ["000001.SS"],
+    "滬深300指數": ["0000300.SS", "000300.SS", "399300.SZ", "ASHR"],
     "新加坡STI指數": ["^STI"],
     "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
     "富時馬來西亞指數": ["^KLSE"],
-    "菲律賓綜合指數": ["PSEI.XC", "^PSI", "^PSEI", "EPH"],  # 多重備援
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": ["^OTC", "^TWO", "^TWOII", "006201.TWO"],  # 修正 OTC 代碼
+    "上櫃指數": ["^OTC", "^TWO", "^TWOII", "006201.TWO"],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -84,7 +84,6 @@ def fetch_otc_direct():
         with urllib.request.urlopen(req, timeout=5) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             if "aaData" in res_data and len(res_data["aaData"]) > 0:
-                # 取得最新一筆櫃買指數收盤價
                 latest = res_data["aaData"][0]
                 close_val = float(latest[1].replace(",", ""))
                 chg_val = float(latest[2].replace(",", ""))
@@ -122,7 +121,6 @@ def fetch_single_ticker_data(item_name, ticker_list, start_dt, end_dt):
         except Exception:
             continue
 
-    # 若 yfinance 抓取失敗，調用特定備援 API
     if item_name == "上櫃指數":
         otc_res = fetch_otc_direct()
         if otc_res:
@@ -170,7 +168,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建表格 HTML (加入欄位寬度鎖定，達成 100% 對齊)
+# 3. 構建表格 HTML (嚴格對齊標題欄位與資料欄位)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
@@ -195,7 +193,7 @@ full_html = f"""
         width: 100%;
         border-collapse: collapse;
         font-size: 12px;
-        table-layout: fixed; /* 強制嚴格依照 column 寬度分配 */
+        table-layout: fixed; /* 強制嚴格依照 colgroup 寬度分配 */
     }}
     .tis-table th {{
         background-color: #002060;
@@ -237,28 +235,28 @@ full_html = f"""
 <div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
-    <!-- 精確定義 15 個欄位的寬度比例，解決未對齊問題 -->
+    <!-- 精確分配 15 個欄位的寬度 (3個大組，每組5欄) -->
     <colgroup>
-        <col style="width: 2.5%;"> <!-- 分類側欄 -->
-        <col style="width: 11%;">  <!-- 指數名稱 -->
-        <col style="width: 7.5%;">  <!-- 收盤價 -->
+        <col style="width: 2.5%;"> <!-- 側欄標題 (如：美國) -->
+        <col style="width: 11.5%;"> <!-- 指數名稱 -->
+        <col style="width: 7.0%;">  <!-- 收盤價 -->
         <col style="width: 6.2%;">  <!-- 變動 -->
         <col style="width: 6.2%;">  <!-- (%) -->
 
         <col style="width: 2.5%;">
-        <col style="width: 11%;">
-        <col style="width: 7.5%;">
+        <col style="width: 11.5%;">
+        <col style="width: 7.0%;">
         <col style="width: 6.2%;">
         <col style="width: 6.2%;">
 
         <col style="width: 2.5%;">
-        <col style="width: 11%;">
-        <col style="width: 7.5%;">
+        <col style="width: 11.5%;">
+        <col style="width: 7.0%;">
         <col style="width: 6.2%;">
         <col style="width: 6.2%;">
     </colgroup>
 
-    <!-- 表頭 -->
+    <!-- 表頭 (對齊下方資料：收盤價/變動/(%) 為右對齊) -->
     <tr>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
@@ -296,10 +294,10 @@ full_html = f"""
         {cell('0050')}
     </tr>
 
-    <!-- 第 5 列 -->
+    <!-- 第 5 列 (亞洲順序更新：上證指數下方為滬深300指數) -->
     <tr>
         {cell('羅素2000指數')}
-        {cell('新加坡STI指數')}
+        {cell('滬深300指數')}
         {cell('0051')}
     </tr>
 
@@ -307,7 +305,7 @@ full_html = f"""
     <tr>
         <td class='side-header' rowspan='4'>歐<br>洲</td>
         {cell('英國FTSE 100')}
-        {cell('泰國曼谷SET指數')}
+        {cell('新加坡STI指數')}
         <td class='side-header' rowspan='4'>國<br>際<br>指<br>數</td>
         {cell('MSCI全球指數')}
     </tr>
@@ -315,14 +313,14 @@ full_html = f"""
     <!-- 第 7 列 -->
     <tr>
         {cell('德國DAX指數')}
-        {cell('富時馬來西亞指數')}
+        {cell('泰國曼谷SET指數')}
         {cell('歐洲Stoxx 50')}
     </tr>
 
     <!-- 第 8 列 -->
     <tr>
         {cell('法國CAC指數')}
-        {cell('菲律賓綜合指數')}
+        {cell('富時馬來西亞指數')}
         {cell('MSCI新興市場')}
     </tr>
 
