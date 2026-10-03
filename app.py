@@ -1,3 +1,4 @@
+import datetime
 import math
 import pandas as pd
 import streamlit as st
@@ -7,7 +8,19 @@ import yfinance as yf
 st.set_page_config(page_title="TIS晨報 - 重要市場收盤表現", layout="wide")
 
 # ---------------------------------------------------------
-# 1. 精確設定商品代碼 (Ticker Map)
+# 1. 介面控制區：日期選擇
+# ---------------------------------------------------------
+st.title("TIS晨報 - 重要市場收盤表現")
+
+today = datetime.date.today()
+selected_date = st.date_input(
+    "請選擇查詢日期（預設為最新）：",
+    value=today,
+    max_value=today,
+)
+
+# ---------------------------------------------------------
+# 2. 精確設定商品代碼 (Ticker Map)
 # ---------------------------------------------------------
 TICKERS = {
     # 美國 & 歐洲
@@ -54,23 +67,33 @@ TICKERS = {
     "Cotton 棉花": "CT=F",
     # 其他商品 / 指標
     "DXY 美元指數": "DX-Y.NYB",
-    "BDIY波羅的海指數": "^BDI",
+    "BDIY波羅的海指數": "BDI",
     "VIX 指數": "^VIX",
     "VXN 指數": "^VXN",
     "美國10年公債殖利率": "^TNX",
 }
 
 
-@st.cache_data(ttl=3600)
-def get_all_data():
+@st.cache_data(ttl=1800)
+def get_market_data(target_date):
     results = {}
+    # 設定抓取區間：從指定日期的前 10 天到指定日期的後 1 天（確保覆蓋週末與例假日）
+    start_dt = target_date - datetime.timedelta(days=10)
+    end_dt = target_date + datetime.timedelta(days=1)
+
     for name, ticker in TICKERS.items():
         try:
             stock = yf.Ticker(ticker)
-            hist = stock.history(period="5d")
-            if len(hist) >= 2:
-                c = hist["Close"].iloc[-1]
-                p = hist["Close"].iloc[-2]
+            df = stock.history(start=start_dt, end=end_dt)
+
+            # 過濾掉空白資料
+            df = df[df["Close"].notna()]
+
+            if len(df) >= 2:
+                # 取得目標日或目標日之前最新的兩筆交易數據
+                c = df["Close"].iloc[-1]
+                p = df["Close"].iloc[-2]
+
                 if math.isnan(c) or math.isnan(p):
                     results[name] = ("-", "-", "-", 0)
                 else:
@@ -82,14 +105,18 @@ def get_all_data():
                         f"{pct:+,.2f}%",
                         pct,
                     )
+            elif len(df) == 1:
+                c = df["Close"].iloc[0]
+                results[name] = (f"{c:,.2f}", "-", "-", 0)
             else:
                 results[name] = ("-", "-", "-", 0)
         except Exception:
             results[name] = ("-", "-", "-", 0)
+
     return results
 
 
-data = get_all_data()
+data = get_market_data(selected_date)
 
 
 # 產生單一項目 4 個 <td> 的 HTML
@@ -114,8 +141,10 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 2. 構建精確對齊的 HTML 表格 (15 欄結構)
+# 3. 構建精確對齊的 HTML 表格
 # ---------------------------------------------------------
+date_str = selected_date.strftime("%Y/%m/%d")
+
 full_html = f"""
 <!DOCTYPE html>
 <html>
@@ -124,14 +153,14 @@ full_html = f"""
     body {{
         font-family: "Microsoft JhengHei", "PingFang TC", Arial, sans-serif;
         margin: 0;
-        padding: 10px;
+        padding: 5px;
         background-color: #ffffff;
     }}
-    h2 {{
-        color: #000000;
+    .sub-title {{
+        color: #333;
+        font-size: 14px;
+        margin-bottom: 10px;
         font-weight: bold;
-        font-size: 24px;
-        margin-bottom: 15px;
     }}
     .tis-table {{
         width: 100%;
@@ -173,7 +202,7 @@ full_html = f"""
 </head>
 <body>
 
-<h2>TIS晨報-重要市場收盤表現</h2>
+<div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
     <!-- 表頭 (對齊 15 欄) -->
@@ -251,7 +280,7 @@ full_html = f"""
         {cell('MSCI拉丁美洲')}
     </tr>
 
-    <!-- 下半半部商品標頭 -->
+    <!-- 下半部商品標頭 -->
     <tr style='border-top: 3px solid #002060;'>
         <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
         <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
@@ -302,6 +331,6 @@ full_html = f"""
 """
 
 # ---------------------------------------------------------
-# 3. 渲染至 Streamlit
+# 4. 渲染至 Streamlit
 # ---------------------------------------------------------
-components.html(full_html, height=700, scrolling=True)
+components.html(full_html, height=720, scrolling=True)
