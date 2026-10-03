@@ -1,7 +1,6 @@
 import datetime
 import json
 import math
-import re
 import urllib.request
 import pandas as pd
 import streamlit as st
@@ -23,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼與備援抓取機制
+# 2. 定義指數代碼配置 (含 Fallback 備援代碼)
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -49,13 +48,7 @@ TICKERS_CONFIG = {
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": [
-        "YAHOO_TW_OTC",
-        "TPEX_DIRECT",
-        "006201.TWO",
-        "^TWOII",
-        "^TWO",
-    ],
+    "上櫃指數": ["TPEX_DIRECT", "^TWOII", "^TWO", "^OTC", "006201.TWO"],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -83,49 +76,8 @@ TICKERS_CONFIG = {
 }
 
 
-def fetch_yahoo_tw_otc():
-    """優先方案：直接爬取 Yahoo 奇摩股市（Yahoo 台灣）的上櫃指數網頁 API"""
-    try:
-        url = "https://tw.stock.yahoo.com/quote/%5ETWOII"
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            },
-        )
-        with urllib.request.urlopen(req, timeout=5) as response:
-            html = response.read().decode("utf-8")
-            # 搜尋價格區塊 (Regex)
-            price_match = re.search(
-                r'"price"\s*:\s*"?([0-9]+\.?[0-9]*)"?', html
-            )
-            change_match = re.search(
-                r'"priceChange"\s*:\s*"?(-?[0-9]+\.?[0-9]*)"?', html
-            )
-            pct_match = re.search(
-                r'"priceChangePercent"\s*:\s*"?(-?[0-9]+\.?[0-9]*)"?', html
-            )
-
-            if price_match:
-                close_val = float(price_match.group(1))
-                chg_val = (
-                    float(change_match.group(1)) if change_match else 0.0
-                )
-                pct_val = float(pct_match.group(1)) if pct_match else 0.0
-                return (
-                    f"{close_val:,.2f}",
-                    f"{chg_val:+,.2f}",
-                    f"{pct_val:+,.2f}%",
-                    pct_val,
-                    False,
-                )
-    except Exception:
-        pass
-    return None
-
-
-def fetch_tpex_direct():
-    """備援方案一：直接抓取台灣櫃買中心 (TPEx) 官方 API"""
+def fetch_otc_from_tpex():
+    """專屬 API：直接抓取台灣櫃買中心 (TPEx) 官方數據"""
     try:
         url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
         req = urllib.request.Request(
@@ -156,31 +108,23 @@ def fetch_tpex_direct():
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
-    抓取核心邏輯：
-    1. 專屬指數（如上櫃指數）先跑 Yahoo 台灣與櫃買官方 API[cite: 10]。
-    2. 萬一休市或假日，無條件遞補最近一天的收盤價格，變動與 % 顯示「休市」。
+    精確資料抓取邏輯：
+    1. 時區抹平：移除 yfinance 日期時區影響，解決台灣股票與美股跨時區誤判問題。
+    2. 真實休市判斷：僅當選擇日期距最新交易日相差大於 2 個非假日天數時（長假休市）才判定為休市。
     """
-    if item_name == "上櫃指數":
-        res_ytw = fetch_yahoo_tw_otc()
-        if res_ytw:
-            return res_ytw
-        res_tpex = fetch_tpex_direct()
-        if res_tpex:
-            return res_tpex
+    if item_name == "上櫃指數" and target_date == datetime.date.today():
+        tpex_res = fetch_otc_from_tpex()
+        if tpex_res:
+            return tpex_res
 
     start_dt = target_date - datetime.timedelta(days=30)
-    end_dt = target_date + datetime.timedelta(days=1)
+    end_dt = target_date + datetime.timedelta(days=2)
 
     for symbol in ticker_list:
-        if symbol == "YAHOO_TW_OTC":
-            res = fetch_yahoo_tw_otc()
-            if res:
-                return res
-            continue
         if symbol == "TPEX_DIRECT":
-            res = fetch_tpex_direct()
-            if res:
-                return res
+            tpex_res = fetch_otc_from_tpex()
+            if tpex_res:
+                return tpex_res
             continue
 
         try:
@@ -193,20 +137,27 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             if len(df) == 0:
                 continue
 
-            df.index = pd.to_datetime(df.index).date
+            # 轉為不帶時區的標準 Date 格式
+            df.index = pd.to_datetime(df.index).tz_localize(None).date
+
+            # 過濾小於等於 target_date 的資料
             df_filtered = df[df.index <= target_date]
 
             if len(df_filtered) == 0:
-                df_filtered = df  # 自動退回取最新有效數據
+                df_filtered = df  # 若無更早資料則退回使用最新資料
 
             latest_traded_date = df_filtered.index[-1]
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 判斷 target_date 當天是否休市
-            is_closed = latest_traded_date != target_date
+            # 計算 target_date 與最新交易日之間的日曆天數差
+            days_diff = (target_date - latest_traded_date).days
 
-            if is_closed:
-                # 休市：價格填最新，變動呈現休市
+            # 僅在長假（例如平日且落後 2 天以上）時判定休市；週末不強制判定休市
+            is_holiday_market = False
+            if target_date.weekday() < 5 and days_diff >= 2:
+                is_holiday_market = True
+
+            if is_holiday_market and (item_name in ["上證指數", "滬深300指數"]):
                 return (
                     f"{latest_price:,.2f}",
                     "休市",
@@ -215,6 +166,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
                     True,
                 )
 
+            # 正常交易日漲跌計算
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
@@ -234,11 +186,11 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
         except Exception:
             continue
 
-    # 最後備援
+    # 針對上櫃指數之備援
     if item_name == "上櫃指數":
-        res_tpex = fetch_tpex_direct()
-        if res_tpex:
-            return res_tpex
+        tpex_res = fetch_otc_from_tpex()
+        if tpex_res:
+            return tpex_res
 
     return ("-", "-", "-", 0, False)
 
@@ -285,7 +237,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建深藍色 HTML 表格 (含下半部 Commodity 區域)
+# 3. 構建深藍色 HTML 表格
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
