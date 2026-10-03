@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 精確設定原生指數 Ticker
+# 2. 定義指數代碼配置 (含 Fallback 備援代碼)
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -42,13 +42,13 @@ TICKERS_CONFIG = {
     "上證指數": ["000001.SS"],
     "滬深300指數": ["000300.SS", "399300.SZ"],
     "新加坡STI指數": ["^STI"],
-    "泰國曼谷SET指數": ["^SET.BK", "^SET"],
+    "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
     "富時馬來西亞指數": ["^KLSE"],
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": ["OTC_DIRECT", "^TWOII", "006201.TWO"],  # 啟用櫃買中心官方直連
+    "上櫃指數": ["TPEX_DIRECT", "^TWOII", "^TWO", "^OTC", "006201.TWO"],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -77,7 +77,7 @@ TICKERS_CONFIG = {
 
 
 def fetch_otc_from_tpex():
-    """專屬 API：直接抓取台灣證券櫃檯買賣中心 (TPEx) 官方上櫃指數數據"""
+    """專屬 API：直接抓取台灣櫃買中心 (TPEx) 官方最新數據"""
     try:
         url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
         req = urllib.request.Request(
@@ -89,12 +89,11 @@ def fetch_otc_from_tpex():
         with urllib.request.urlopen(req, timeout=5) as response:
             res_data = json.loads(response.read().decode("utf-8"))
             if "aaData" in res_data and len(res_data["aaData"]) > 0:
-                # aaData 第 0 筆即為櫃買指數 (OTC Index)
                 latest = res_data["aaData"][0]
-                close_val = float(latest[1].replace(",", ""))
-                chg_val = float(latest[2].replace(",", ""))
+                close_val = float(str(latest[1]).replace(",", ""))
+                chg_val = float(str(latest[2]).replace(",", ""))
                 prev_val = close_val - chg_val
-                pct = (chg_val / prev_val) * 100
+                pct = (chg_val / prev_val) * 100 if prev_val != 0 else 0
                 return (
                     f"{close_val:,.2f}",
                     f"{chg_val:+,.2f}",
@@ -109,70 +108,79 @@ def fetch_otc_from_tpex():
 
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
-    抓取邏輯：
-    1. 若為上櫃指數，優先使用櫃買中心官方 API 獲取準確即時數據[cite: 12]。
-    2. 其他指數依次嘗試 yfinance ticker。
-    3. 若遇長假/國定假日無當日數據，自動帶出最近交易日收盤價，變動顯示「休市」[cite: 11]。
+    資料抓取核心邏輯：
+    1. 價格：帶入最新一個交易日收盤價。
+    2. 變動與漲跌幅：若選擇的 target_date 當天無交易（休市/週末/國定假日），則顯示「休市」。
     """
-    # 專屬防護：上櫃指數優先嘗試連線 TPEx 官方
     if item_name == "上櫃指數" and target_date == datetime.date.today():
         tpex_res = fetch_otc_from_tpex()
         if tpex_res:
             return tpex_res
 
-    start_dt = target_date - datetime.timedelta(days=20)
+    start_dt = target_date - datetime.timedelta(days=30)
     end_dt = target_date + datetime.timedelta(days=1)
 
     for symbol in ticker_list:
-        if symbol == "OTC_DIRECT":
-            tpex_res = fetch_otc_from_tpex()
-            if tpex_res:
-                return tpex_res
+        if symbol == "TPEX_DIRECT":
             continue
 
         try:
             stock = yf.Ticker(symbol)
             df = stock.history(start=start_dt, end=end_dt)
-            df = df[df["Close"].notna()]
+            if df.empty:
+                df = stock.history(period="15d")
 
+            df = df[df["Close"].notna()]
             if len(df) == 0:
                 continue
 
-            # 截斷至 target_date 以前的資料
-            df_filtered = df[df.index.date <= target_date]
-            if len(df_filtered) == 0:
-                continue
+            # 將索引時間轉換為純 Date 格式
+            df.index = pd.to_datetime(df.index).date
 
-            latest_trade_date = df_filtered.index[-1].date()
+            # 過濾小於等於 target_date 的數據
+            df_filtered = df[df.index <= target_date]
+
+            if len(df_filtered) == 0:
+                # 若選取的日期比歷史紀錄還早，退回使用全數據
+                df_filtered = df
+
+            latest_traded_date = df_filtered.index[-1]
             latest_price = df_filtered["Close"].iloc[-1]
 
-            # 判斷 target_date 是否休市（平日無當日交易紀錄）
-            is_holiday = False
-            if target_date.weekday() < 5 and latest_trade_date < target_date:
-                is_holiday = True
+            # 判斷 target_date 當天是否休市（選擇當天沒有實際交易 Candle 資料）
+            is_closed = latest_traded_date != target_date
 
-            if is_holiday:
-                return (f"{latest_price:,.2f}", "休市", "休市", 0, True)
+            if is_closed:
+                # 當天休市：顯示最新價格，變動與 % 顯示「休市」
+                return (
+                    f"{latest_price:,.2f}",
+                    "休市",
+                    "休市",
+                    0,
+                    True,
+                )
 
+            # 正常交易日計算漲跌金額與幅度
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
-                chg = c - p
-                pct = (chg / p) * 100
-                return (
-                    f"{c:,.2f}",
-                    f"{chg:+,.2f}",
-                    f"{pct:+,.2f}%",
-                    pct,
-                    False,
-                )
-            else:
+                if not math.isnan(c) and not math.isnan(p):
+                    chg = c - p
+                    pct = (chg / p) * 100 if p != 0 else 0
+                    return (
+                        f"{c:,.2f}",
+                        f"{chg:+,.2f}",
+                        f"{pct:+,.2f}%",
+                        pct,
+                        False,
+                    )
+            elif len(df_filtered) == 1:
                 return (f"{latest_price:,.2f}", "0.00", "0.00%", 0, False)
 
         except Exception:
             continue
 
-    # 若特定日期的官方連線均超時，自動從備援二次嘗試 TPEx 官方
+    # 針對上櫃指數之備援
     if item_name == "上櫃指數":
         tpex_res = fetch_otc_from_tpex()
         if tpex_res:
@@ -197,9 +205,9 @@ def cell(item_name):
     if item_name not in data or data[item_name][0] == "-":
         return f"<td class='item-name'>{item_name}</td><td class='num-val'>-</td><td class='num-val'>-</td><td class='num-val'>-</td>"
 
-    val, chg, pct_str, raw_pct, is_holiday = data[item_name]
+    val, chg, pct_str, raw_pct, is_closed = data[item_name]
 
-    if is_holiday:
+    if is_closed:
         return (
             f"<td class='item-name'>{item_name}</td>"
             f"<td class='num-val'>{val}</td>"
@@ -223,7 +231,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建深藍色 HTML 表格 (恢復深藍格式 + 固定欄位寬度)
+# 3. 構建深藍色 HTML 表格 (含下半部 Commodity 區域)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
