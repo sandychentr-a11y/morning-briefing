@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼配置 (優化滬深300與泰國指數的 Ticker 順序)
+# 2. 定義指數代碼配置 (多重 Fallback 代碼)
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -40,9 +40,9 @@ TICKERS_CONFIG = {
     "南韓KOSPI指數": ["^KS11"],
     "恆生指數": ["^HSI"],
     "上證指數": ["000001.SS"],
-    "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],  # 增加多重備援
+    "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],
     "新加坡STI指數": ["^STI"],
-    "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],  # 多重格式切換
+    "泰國曼谷SET指數": ["^SET.BK", "^SET", "SET.BK"],
     "富時馬來西亞指數": ["^KLSE"],
     "印尼雅加達指數": ["^JKSE"],
     # 台灣 & 國際指數
@@ -113,16 +113,13 @@ def fetch_otc_from_tpex(target_date):
 def fetch_single_ticker_data(item_name, ticker_list, target_date):
     """
     強健資料抓取邏輯：
-    1. 逐一嘗試 ticker_list，直到抓取到有漲跌幅的歷史 Candle 資料[cite: 11]。
-    2. 精確區分交易日與休市[cite: 11]。
+    1. 使用 60d 充足歷史，保證計算出真正漲跌金額[cite: 11]。
+    2. 精確判斷國定假日休市與週末[cite: 11]。
     """
     if item_name == "上櫃指數" and target_date == datetime.date.today():
         tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
             return tpex_res
-
-    start_dt = target_date - datetime.timedelta(days=35)
-    end_dt = target_date + datetime.timedelta(days=2)
 
     for symbol in ticker_list:
         if symbol == "TPEX_DIRECT":
@@ -133,22 +130,20 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
 
         try:
             stock = yf.Ticker(symbol)
-            # 優先使用 period 抓取歷史 Candle，避免 start/end 在某些時區失效
-            df = stock.history(period="1mo")
-            if df.empty:
-                df = stock.history(start=start_dt, end=end_dt)
+            # 拉長搜尋 window 至 60 天，確保至少有 2 筆以上的有效 K 線
+            df = stock.history(period="60d")
 
             df = df[df["Close"].notna()]
             if len(df) == 0:
                 continue
 
-            # 正規化時區與日期格式
+            # 抹平時區差異，統一樣式
             try:
                 df.index = df.index.tz_convert("Asia/Taipei").date
             except Exception:
                 df.index = pd.to_datetime(df.index).date
 
-            # 抓取 target_date 當天或前一個交易日
+            # 擷取截至 target_date 當天或之前的所有紀錄
             df_filtered = df[df.index <= target_date]
             if len(df_filtered) == 0:
                 df_filtered = df
@@ -161,7 +156,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
             if target_date.weekday() >= 5:
                 is_closed = True
             elif target_date not in df_filtered.index:
-                # 若為國定連假（如十一長假）
+                # 國定連假（如十一黃金週）
                 days_diff = (target_date - latest_traded_date).days
                 if days_diff >= 1 and item_name in ["上證指數", "滬深300指數"]:
                     is_closed = True
@@ -175,14 +170,13 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
                     True,
                 )
 
-            # 計算漲跌數值與變動
+            # 當天開盤正常交易：計算最後兩筆燭台變動
             if len(df_filtered) >= 2:
                 c = df_filtered["Close"].iloc[-1]
                 p = df_filtered["Close"].iloc[-2]
                 if not math.isnan(c) and not math.isnan(p) and p != 0:
                     chg = c - p
                     pct = (chg / p) * 100
-                    # 如果計算出來的變動不為 0，代表成功找到真正有更新的代碼
                     return (
                         f"{c:,.2f}",
                         f"{chg:+,.2f}",
@@ -196,7 +190,7 @@ def fetch_single_ticker_data(item_name, ticker_list, target_date):
         except Exception:
             continue
 
-    # 上櫃指數專屬備援
+    # 備援機制
     if item_name == "上櫃指數":
         tpex_res = fetch_otc_from_tpex(target_date)
         if tpex_res:
@@ -247,7 +241,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建深藍色 HTML 表格 (含下半部 Commodity 區域)
+# 3. 構建深藍色 HTML 表格
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
