@@ -1,4 +1,4 @@
-import datetime
+import math
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -71,14 +71,17 @@ def get_all_data():
             if len(hist) >= 2:
                 c = hist["Close"].iloc[-1]
                 p = hist["Close"].iloc[-2]
-                chg = c - p
-                pct = (chg / p) * 100
-                results[name] = (
-                    f"{c:,.2f}",
-                    f"{chg:+,.2f}",
-                    f"{pct:+,.2f}%",
-                    pct,
-                )
+                if math.isnan(c) or math.isnan(p):
+                    results[name] = ("-", "-", "-", 0)
+                else:
+                    chg = c - p
+                    pct = (chg / p) * 100
+                    results[name] = (
+                        f"{c:,.2f}",
+                        f"{chg:+,.2f}",
+                        f"{pct:+,.2f}%",
+                        pct,
+                    )
             else:
                 results[name] = ("-", "-", "-", 0)
         except Exception:
@@ -89,29 +92,29 @@ def get_all_data():
 data = get_all_data()
 
 
-# 產生單一儲存格 HTML 函式
+# 產生單一項目 4 個 <td> 的 HTML
 def cell(item_name):
     if item_name not in data or data[item_name][0] == "-":
-        return f"<td>{item_name}</td><td>-</td><td>-</td><td>-</td>"
+        return f"<td class='item-name'>{item_name}</td><td>-</td><td>-</td><td>-</td>"
 
     val, chg, pct_str, raw_pct = data[item_name]
     if raw_pct > 0:
-        color = "#DC2626"  # 紅漲
+        color = "#DC2626"  # 上漲紅
     elif raw_pct < 0:
-        color = "#16A34A"  # 綠跌
+        color = "#16A34A"  # 下跌綠
     else:
         color = "#000000"
 
     return (
-        f"<td style='text-align:left;'>{item_name}</td>"
-        f"<td style='text-align:right;'>{val}</td>"
-        f"<td style='text-align:right; color:{color};'>{chg}</td>"
-        f"<td style='text-align:right; color:{color};'>{pct_str}</td>"
+        f"<td class='item-name'>{item_name}</td>"
+        f"<td class='num-val'>{val}</td>"
+        f"<td class='num-val' style='color:{color};'>{chg}</td>"
+        f"<td class='num-val' style='color:{color};'>{pct_str}</td>"
     )
 
 
 # ---------------------------------------------------------
-# 2. 構建 HTML 表格
+# 2. 構建精確對齊的 HTML 表格 (15 欄結構)
 # ---------------------------------------------------------
 full_html = f"""
 <!DOCTYPE html>
@@ -119,7 +122,7 @@ full_html = f"""
 <head>
 <style>
     body {{
-        font-family: "Microsoft JhengHei", "PingFang TC", sans-serif;
+        font-family: "Microsoft JhengHei", "PingFang TC", Arial, sans-serif;
         margin: 0;
         padding: 10px;
         background-color: #ffffff;
@@ -128,24 +131,27 @@ full_html = f"""
         color: #000000;
         font-weight: bold;
         font-size: 24px;
-        margin-bottom: 12px;
+        margin-bottom: 15px;
     }}
     .tis-table {{
         width: 100%;
         border-collapse: collapse;
-        font-size: 13px;
+        font-size: 12px;
+        table-layout: fixed;
     }}
     .tis-table th {{
         background-color: #002060;
         color: #ffffff;
-        padding: 6px;
+        padding: 6px 2px;
         text-align: center;
         border: 1px solid #002060;
         font-weight: bold;
     }}
     .tis-table td {{
-        padding: 5px 6px;
+        padding: 4px 3px;
         border: 1px solid #d0d0d0;
+        white-space: nowrap;
+        overflow: hidden;
     }}
     .side-header {{
         background-color: #002060;
@@ -153,8 +159,15 @@ full_html = f"""
         font-weight: bold;
         text-align: center;
         vertical-align: middle;
-        width: 35px;
-        line-height: 1.3;
+        width: 32px;
+        line-height: 1.2;
+    }}
+    .item-name {{
+        text-align: left;
+        width: 110px;
+    }}
+    .num-val {{
+        text-align: right;
     }}
 </style>
 </head>
@@ -163,12 +176,14 @@ full_html = f"""
 <h2>TIS晨報-重要市場收盤表現</h2>
 
 <table class='tis-table'>
+    <!-- 表頭 (對齊 15 欄) -->
     <tr>
-        <th colspan='4'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='4'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='4'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>指數</th><th>收盤價</th><th>變動</th><th>(%)</th>
     </tr>
 
+    <!-- 第 1 列 -->
     <tr>
         <td class='side-header' rowspan='5'>美<br>國</td>
         {cell('道瓊工業指數')}
@@ -178,30 +193,35 @@ full_html = f"""
         {cell('加權指數')}
     </tr>
 
+    <!-- 第 2 列 -->
     <tr>
         {cell('那斯達克指數')}
         {cell('南韓KOSPI指數')}
         {cell('不含電子指數')}
     </tr>
 
+    <!-- 第 3 列 -->
     <tr>
         {cell('標普500指數')}
         {cell('恆生指數')}
         {cell('上櫃指數')}
     </tr>
 
+    <!-- 第 4 列 -->
     <tr>
         {cell('費城半導體指數')}
         {cell('上證指數')}
         {cell('0050')}
     </tr>
 
+    <!-- 第 5 列 -->
     <tr>
         {cell('羅素2000指數')}
         {cell('新加坡STI指數')}
         {cell('0051')}
     </tr>
 
+    <!-- 第 6 列 -->
     <tr>
         <td class='side-header' rowspan='4'>歐<br>洲</td>
         {cell('英國FTSE 100')}
@@ -210,30 +230,35 @@ full_html = f"""
         {cell('MSCI全球指數')}
     </tr>
 
+    <!-- 第 7 列 -->
     <tr>
         {cell('德國DAX指數')}
         {cell('富時馬來西亞指數')}
         {cell('歐洲Stoxx 50')}
     </tr>
 
+    <!-- 第 8 列 -->
     <tr>
         {cell('法國CAC指數')}
         {cell('菲律賓綜合指數')}
         {cell('MSCI新興市場')}
     </tr>
 
+    <!-- 第 9 列 -->
     <tr>
         {cell('道瓊歐洲600指數')}
         {cell('印尼雅加達指數')}
         {cell('MSCI拉丁美洲')}
     </tr>
 
+    <!-- 下半半部商品標頭 -->
     <tr style='border-top: 3px solid #002060;'>
-        <th colspan='4'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='4'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
-        <th colspan='4'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
+        <th colspan='2'>Commodity</th><th>收盤價</th><th>變動</th><th>(%)</th>
     </tr>
 
+    <!-- 第 10 列 -->
     <tr>
         <td class='side-header' rowspan='5'>金<br>屬<br>能<br>源</td>
         {cell('Crude Oil 原油')}
@@ -243,24 +268,28 @@ full_html = f"""
         {cell('DXY 美元指數')}
     </tr>
 
+    <!-- 第 11 列 -->
     <tr>
         {cell('Natural Gas 天然氣')}
         {cell('Corn 玉米')}
         {cell('BDIY波羅的海指數')}
     </tr>
 
+    <!-- 第 12 列 -->
     <tr>
         {cell('Gold 黃金')}
         {cell('Wheat 小麥')}
         {cell('VIX 指數')}
     </tr>
 
+    <!-- 第 13 列 -->
     <tr>
         {cell('Silver 白銀')}
         {cell('Soybean 黃豆')}
         {cell('VXN 指數')}
     </tr>
 
+    <!-- 第 14 列 -->
     <tr>
         {cell('Copper 銅')}
         {cell('Cotton 棉花')}
@@ -273,6 +302,6 @@ full_html = f"""
 """
 
 # ---------------------------------------------------------
-# 3. 使用 Streamlit 原生 HTML 元件安全渲染
+# 3. 渲染至 Streamlit
 # ---------------------------------------------------------
-components.html(full_html, height=750, scrolling=True)
+components.html(full_html, height=700, scrolling=True)
