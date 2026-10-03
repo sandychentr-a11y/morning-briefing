@@ -22,7 +22,7 @@ selected_date = st.date_input(
 )
 
 # ---------------------------------------------------------
-# 2. 定義指數代碼與備援抓取機制
+# 2. 精確設定原生指數 Ticker
 # ---------------------------------------------------------
 TICKERS_CONFIG = {
     # 美國 & 歐洲
@@ -40,7 +40,7 @@ TICKERS_CONFIG = {
     "南韓KOSPI指數": ["^KS11"],
     "恆生指數": ["^HSI"],
     "上證指數": ["000001.SS"],
-    "滬深300指數": ["000300.SS", "399300.SZ", "ASHR"],
+    "滬深300指數": ["000300.SS", "399300.SZ"],  # 使用原生滬深300指數代碼
     "新加坡STI指數": ["^STI"],
     "泰國曼谷SET指數": ["^SET.BK", "^SET"],
     "富時馬來西亞指數": ["^KLSE"],
@@ -48,7 +48,7 @@ TICKERS_CONFIG = {
     # 台灣 & 國際指數
     "加權指數": ["^TWII"],
     "不含電子指數": ["^TW28", "0052.TW"],
-    "上櫃指數": ["^OTC", "^TWO", "^TWOII", "006201.TWO"],
+    "上櫃指數": ["^OTC", "^TWO", "^TWOII"],
     "0050": ["0050.TW"],
     "0051": ["0051.TW"],
     "MSCI全球指數": ["URTH"],
@@ -76,70 +76,72 @@ TICKERS_CONFIG = {
 }
 
 
-def fetch_otc_direct():
-    """備援：直接抓取台灣櫃買中心 API"""
-    try:
-        url = "https://www.tpex.org.tw/web/stock/aftertrading/index_summary/summary_response.php"
-        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-        with urllib.request.urlopen(req, timeout=5) as response:
-            res_data = json.loads(response.read().decode("utf-8"))
-            if "aaData" in res_data and len(res_data["aaData"]) > 0:
-                latest = res_data["aaData"][0]
-                close_val = float(latest[1].replace(",", ""))
-                chg_val = float(latest[2].replace(",", ""))
-                prev_val = close_val - chg_val
-                pct = (chg_val / prev_val) * 100
-                return (
-                    f"{close_val:,.2f}",
-                    f"{chg_val:+,.2f}",
-                    f"{pct:+,.2f}%",
-                    pct,
-                )
-    except Exception:
-        pass
-    return None
+def fetch_single_ticker_data(item_name, ticker_list, target_date):
+    """
+    抓取邏輯：
+    1. 計算 target_date 當天或往前最接近的交易日數據。
+    2. 若 target_date 當日為休市（例如長假無最新收盤數據），則取前一日數據，變動呈現「休市」。
+    """
+    start_dt = target_date - datetime.timedelta(days=20)
+    end_dt = target_date + datetime.timedelta(days=1)
 
-
-def fetch_single_ticker_data(item_name, ticker_list, start_dt, end_dt):
-    """嘗試從多個代碼抓取數據，若失敗則調用專屬備援"""
     for symbol in ticker_list:
         try:
             stock = yf.Ticker(symbol)
             df = stock.history(start=start_dt, end=end_dt)
             df = df[df["Close"].notna()]
-            if len(df) >= 2:
-                c = df["Close"].iloc[-1]
-                p = df["Close"].iloc[-2]
-                if not math.isnan(c) and not math.isnan(p):
-                    chg = c - p
-                    pct = (chg / p) * 100
-                    return (f"{c:,.2f}", f"{chg:+,.2f}", f"{pct:+,.2f}%", pct)
-            elif len(df) == 1:
-                c = df["Close"].iloc[0]
-                if not math.isnan(c):
-                    return (f"{c:,.2f}", "-", "-", 0)
+
+            if len(df) == 0:
+                continue
+
+            # 檢查最新的交易日期是否落在 target_date (含當天)
+            last_date = df.index[-1].date()
+
+            # 若目標日期小於最後數據日，截斷資料
+            df_filtered = df[df.index.date <= target_date]
+            if len(df_filtered) == 0:
+                continue
+
+            latest_trade_date = df_filtered.index[-1].date()
+            latest_price = df_filtered["Close"].iloc[-1]
+
+            # 判斷 target_date 當天是否休市（若距離最後交易日超過 0 天，但遇週末或假日視狀況）
+            # 如果選擇的日期沒有交易資料（例如陸股十一連假）：
+            is_holiday = False
+            # 對於平日（週一至週五）但交易日落後的情況判定為休市
+            if target_date.weekday() < 5 and latest_trade_date < target_date:
+                is_holiday = True
+
+            if is_holiday:
+                # 顯示最後交易日收盤價，變動顯示休市
+                return (f"{latest_price:,.2f}", "休市", "休市", 0, True)
+
+            if len(df_filtered) >= 2:
+                c = df_filtered["Close"].iloc[-1]
+                p = df_filtered["Close"].iloc[-2]
+                chg = c - p
+                pct = (chg / p) * 100
+                return (
+                    f"{c:,.2f}",
+                    f"{chg:+,.2f}",
+                    f"{pct:+,.2f}%",
+                    pct,
+                    False,
+                )
+            else:
+                return (f"{latest_price:,.2f}", "0.00", "0.00%", 0, False)
+
         except Exception:
             continue
 
-    if item_name == "上櫃指數":
-        otc_res = fetch_otc_direct()
-        if otc_res:
-            return otc_res
-
-    return ("-", "-", "-", 0)
+    return ("-", "-", "-", 0, False)
 
 
 @st.cache_data(ttl=1800)
 def get_market_data(target_date):
     results = {}
-    start_dt = target_date - datetime.timedelta(days=20)
-    end_dt = target_date + datetime.timedelta(days=1)
-
     for name, ticker_list in TICKERS_CONFIG.items():
-        results[name] = fetch_single_ticker_data(
-            name, ticker_list, start_dt, end_dt
-        )
-
+        results[name] = fetch_single_ticker_data(name, ticker_list, target_date)
     return results
 
 
@@ -151,7 +153,17 @@ def cell(item_name):
     if item_name not in data or data[item_name][0] == "-":
         return f"<td class='item-name'>{item_name}</td><td class='num-val'>-</td><td class='num-val'>-</td><td class='num-val'>-</td>"
 
-    val, chg, pct_str, raw_pct = data[item_name]
+    val, chg, pct_str, raw_pct, is_holiday = data[item_name]
+
+    if is_holiday:
+        # 休市狀態：文字顯示灰藍色或黑色
+        return (
+            f"<td class='item-name'>{item_name}</td>"
+            f"<td class='num-val'>{val}</td>"
+            f"<td class='num-val' style='color:#6B7280; font-size: 11px;'>休市</td>"
+            f"<td class='num-val' style='color:#6B7280; font-size: 11px;'>休市</td>"
+        )
+
     if raw_pct > 0:
         color = "#DC2626"  # 上漲紅
     elif raw_pct < 0:
@@ -168,7 +180,7 @@ def cell(item_name):
 
 
 # ---------------------------------------------------------
-# 3. 構建表格 HTML (完全恢復深藍 HTML 大表格 + 精確欄位對齊)
+# 3. 構建深藍色 HTML 表格 (恢復原本深藍格式 + 休市自動處理)
 # ---------------------------------------------------------
 date_str = selected_date.strftime("%Y/%m/%d")
 
@@ -193,7 +205,7 @@ full_html = f"""
         width: 100%;
         border-collapse: collapse;
         font-size: 12px;
-        table-layout: fixed; /* 強制嚴格依照 colgroup 寬度分配 */
+        table-layout: fixed;
     }}
     .tis-table th {{
         background-color: #002060;
@@ -204,7 +216,7 @@ full_html = f"""
     }}
     .th-center {{ text-align: center; }}
     .th-right {{ text-align: right; padding-right: 5px; }}
-
+    
     .tis-table td {{
         padding: 4px 3px;
         border: 1px solid #d0d0d0;
@@ -235,20 +247,19 @@ full_html = f"""
 <div class='sub-title'>基準日期：{date_str}</div>
 
 <table class='tis-table'>
-    <!-- 精確分配 15 個欄位的寬度 (3個大組，每組5欄) -->
     <colgroup>
-        <col style="width: 2.5%;"> <!-- 側欄標題 (如：美國) -->
-        <col style="width: 11.5%;"> <!-- 指數名稱 -->
-        <col style="width: 7.0%;">  <!-- 收盤價 -->
-        <col style="width: 6.2%;">  <!-- 變動 -->
-        <col style="width: 6.2%;">  <!-- (%) -->
-
         <col style="width: 2.5%;">
         <col style="width: 11.5%;">
         <col style="width: 7.0%;">
         <col style="width: 6.2%;">
         <col style="width: 6.2%;">
-
+        
+        <col style="width: 2.5%;">
+        <col style="width: 11.5%;">
+        <col style="width: 7.0%;">
+        <col style="width: 6.2%;">
+        <col style="width: 6.2%;">
+        
         <col style="width: 2.5%;">
         <col style="width: 11.5%;">
         <col style="width: 7.0%;">
@@ -256,7 +267,7 @@ full_html = f"""
         <col style="width: 6.2%;">
     </colgroup>
 
-    <!-- 表頭 (對齊下方資料：收盤價/變動/(%) 為右對齊) -->
+    <!-- 上半部表頭 -->
     <tr>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
         <th colspan='2' class='th-center'>指數</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
@@ -294,7 +305,7 @@ full_html = f"""
         {cell('0050')}
     </tr>
 
-    <!-- 第 5 列 (亞洲順序：上證指數下方為滬深300指數) -->
+    <!-- 第 5 列 (滬深300指數) -->
     <tr>
         {cell('羅素2000指數')}
         {cell('滬深300指數')}
@@ -331,7 +342,7 @@ full_html = f"""
         {cell('MSCI拉丁美洲')}
     </tr>
 
-    <!-- 下半部商品標頭 -->
+    <!-- 下半部商品標頭 (Commodity) -->
     <tr style='border-top: 3px solid #002060;'>
         <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
         <th colspan='2' class='th-center'>Commodity</th><th class='th-right'>收盤價</th><th class='th-right'>變動</th><th class='th-right'>(%)</th>
